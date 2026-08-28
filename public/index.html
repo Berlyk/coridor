@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0f">
+<meta name="description" content="Коридор — онлайн-версия настольной игры Quoridor. Лобби, партии 1 на 1 и боты четырёх уровней.">
+<title>КОРИДОР</title>
+<link rel="icon" href="/img/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/board.css">
+</head>
+<body>
+
+<div class="scene" aria-hidden="true">
+  <div class="scene__base"></div>
+  <div class="scene__maze"></div>
+  <div class="scene__glow"></div>
+  <div class="scene__pillar scene__pillar--l"><i></i><i></i></div>
+  <div class="scene__pillar scene__pillar--r"><i></i><i></i></div>
+  <div class="scene__grain"></div>
+</div>
+
+<div class="shell">
+  <header class="topbar">
+    <nav class="nav" id="nav"></nav>
+  </header>
+
+  <main id="view" class="wrap"></main>
+
+  <footer class="footer wrap">
+    <div class="hstack">
+      <span id="server-stats" class="dim-2"></span>
+    </div>
+    <div style="margin-top:8px">© 2026 КОРИДОР — правила Quoridor, дизайн в стиле CourtGame</div>
+  </footer>
+</div>
+
+<div id="toasts"></div>
+<div id="modal-root"></div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

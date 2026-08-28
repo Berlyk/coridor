@@ -1,0 +1,17 @@
+{
+  "name": "coridor",
+  "version": "1.0.0",
+  "description": "Коридор — онлайн-версия настольной игры Quoridor: лобби, игра 1 на 1, боты четырёх уровней",
+  "type": "module",
+  "private": true,
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node tests/engine.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,558 @@
+/* ==================================================================
+   КОРИДОР — доска, фишки, стены и вся анимация
+   Геометрия: --cell (сторона клетки), --gap (ширина паза), --step.
+   Любой элемент позиционируется через --r / --c.
+   ================================================================== */
+
+.board-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.board-frame {
+  position: relative;
+  width: 100%;
+  max-width: var(--board-max, 660px);
+  aspect-ratio: 1;
+  --frame-pad: 20px;
+  padding: var(--frame-pad);
+  border-radius: var(--radius-2xl);
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(220,38,38,.10), transparent 62%),
+    linear-gradient(160deg, #1a1a1f, #121216 55%, #0f0f13);
+  box-shadow:
+    0 30px 70px rgba(0,0,0,.55),
+    inset 0 1px 0 rgba(255,255,255,.05);
+  transition: box-shadow .3s var(--ease);
+}
+.board-frame.is-myturn {
+  box-shadow:
+    0 30px 70px rgba(0,0,0,.55),
+    inset 0 1px 0 rgba(255,255,255,.05),
+    0 0 0 1px rgba(220,38,38,.35),
+    0 0 40px rgba(220,38,38,.14);
+}
+
+.board {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  --step: calc(var(--cell) + var(--gap));
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.board.is-shake { animation: board-shake .34s var(--ease); }
+@keyframes board-shake {
+  0%   { transform: translate(0,0) }
+  18%  { transform: translate(1.5px, -2px) }
+  36%  { transform: translate(-2px, 1.5px) }
+  54%  { transform: translate(1.5px, 1px) }
+  74%  { transform: translate(-1px, -1px) }
+  100% { transform: translate(0,0) }
+}
+
+.b-layer { position: absolute; inset: 0; }
+.b-layer--over { pointer-events: none; }
+
+/* ---------------- клетки ---------------- */
+
+.cell {
+  position: absolute;
+  width: var(--cell);
+  height: var(--cell);
+  left: calc(var(--c) * var(--step));
+  top: calc(var(--r) * var(--step));
+  border-radius: calc(var(--cell) * .16);
+  background: linear-gradient(160deg, #1e1e23, #17171b);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.035), inset 0 1px 0 rgba(255,255,255,.03);
+  transition: background .2s var(--ease), box-shadow .2s var(--ease);
+}
+.cell.is-goal-0 {
+  background: linear-gradient(160deg, rgba(220,38,38,.20), rgba(30,30,35,.9));
+  box-shadow: inset 0 0 0 1px rgba(220,38,38,.28);
+}
+.cell.is-goal-1 {
+  background: linear-gradient(160deg, rgba(228,228,231,.14), rgba(30,30,35,.9));
+  box-shadow: inset 0 0 0 1px rgba(228,228,231,.2);
+}
+.cell.is-last {
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), inset 0 0 14px rgba(255,255,255,.08);
+}
+
+/* сетка координат по краям */
+.b-coords { position: absolute; inset: 0; pointer-events: none; }
+.b-coord {
+  position: absolute;
+  font-size: clamp(8px, calc(var(--cell) * .26), 12px);
+  font-family: var(--mono);
+  color: var(--muted-3);
+  line-height: 1;
+}
+
+/* ---------------- маршрут-подсказка ---------------- */
+
+.b-path { pointer-events: none; }
+.b-path svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.b-path path {
+  fill: none;
+  stroke-width: calc(var(--cell) * .09);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1 calc(var(--cell) * .3);
+  opacity: .75;
+  animation: path-flow 1.6s linear infinite;
+}
+@keyframes path-flow { to { stroke-dashoffset: calc(var(--cell) * -1.3); } }
+
+/* ---------------- доступные ходы ---------------- */
+
+/* слой ходов лежит НАД зоной наведения, иначе точки не ловят курсор */
+.moves-layer { pointer-events: none; z-index: 6; }
+.move-dot {
+  position: absolute;
+  width: var(--cell); height: var(--cell);
+  left: calc(var(--c) * var(--step));
+  top: calc(var(--r) * var(--step));
+  display: grid; place-items: center;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: calc(var(--cell) * .16);
+  transition: background .18s var(--ease);
+}
+.move-dot::after {
+  content: '';
+  width: 34%; height: 34%;
+  border-radius: 50%;
+  background: rgba(244,244,245,.28);
+  box-shadow: 0 0 0 1px rgba(255,255,255,.18);
+  transition: transform .2s var(--spring), background .2s var(--ease), box-shadow .2s var(--ease);
+  animation: dot-breathe 2.4s var(--ease) infinite;
+}
+.move-dot.is-jump::after {
+  background: rgba(220,38,38,.5);
+  box-shadow: 0 0 0 1px rgba(220,38,38,.7), 0 0 16px rgba(220,38,38,.5);
+}
+.move-dot:hover { background: rgba(255,255,255,.05); }
+.move-dot:hover::after {
+  transform: scale(1.5);
+  background: var(--red);
+  box-shadow: 0 0 0 2px rgba(255,255,255,.2), 0 0 22px rgba(220,38,38,.7);
+  animation: none;
+}
+@keyframes dot-breathe { 0%,100% { opacity: .6; } 50% { opacity: 1; } }
+
+/* ---------------- фишки ---------------- */
+
+.pawns-layer { pointer-events: none; }
+.pawn {
+  position: absolute;
+  width: var(--cell); height: var(--cell);
+  left: 0; top: 0;
+  transform: translate(calc(var(--c) * var(--step)), calc(var(--r) * var(--step)));
+  transition: transform .36s var(--spring);
+  display: grid; place-items: center;
+  will-change: transform;
+}
+.pawn__body {
+  width: 68%; height: 68%;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: clamp(9px, calc(var(--cell) * .3), 16px);
+  font-weight: 800;
+  position: relative;
+  transition: transform .3s var(--spring), box-shadow .3s var(--ease);
+}
+.pawn--0 .pawn__body {
+  background: radial-gradient(circle at 32% 28%,
+    var(--sk0-hi, #f87171), var(--sk0-mid, #dc2626) 45%, var(--sk0-lo, #7f1d1d));
+  color: var(--sk0-fg, #fff);
+  box-shadow:
+    0 6px 18px var(--sk0-glow, rgba(220,38,38,.45)),
+    inset 0 2px 4px rgba(255,255,255,.35),
+    inset 0 -4px 8px rgba(0,0,0,.35);
+}
+.pawn--1 .pawn__body {
+  background: radial-gradient(circle at 32% 28%,
+    var(--sk1-hi, #ffffff), var(--sk1-mid, #d4d4d8) 45%, var(--sk1-lo, #71717a));
+  color: var(--sk1-fg, #18181b);
+  box-shadow:
+    0 6px 18px rgba(0,0,0,.5),
+    inset 0 2px 4px rgba(255,255,255,.6),
+    inset 0 -4px 8px rgba(0,0,0,.28);
+}
+.pawn.is-active .pawn__body { animation: pawn-pulse 2s var(--ease) infinite; }
+@keyframes pawn-pulse {
+  0%,100% { transform: scale(1); }
+  50%     { transform: scale(1.07); }
+}
+.pawn.is-active::before {
+  content: '';
+  position: absolute;
+  width: 86%; height: 86%;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  opacity: .45;
+  animation: pawn-ring 2s var(--ease) infinite;
+}
+.pawn--0.is-active::before { color: var(--sk0-mid, var(--red)); }
+.pawn--1.is-active::before { color: var(--sk1-mid, var(--silver)); }
+@keyframes pawn-ring {
+  0%   { transform: scale(.9); opacity: .5; }
+  70%  { transform: scale(1.35); opacity: 0; }
+  100% { transform: scale(1.35); opacity: 0; }
+}
+.pawn.is-hopping { animation: pawn-hop .42s var(--ease); }
+@keyframes pawn-hop {
+  0%   { filter: brightness(1); }
+  40%  { filter: brightness(1.5); }
+  100% { filter: brightness(1); }
+}
+.pawn.is-hopping .pawn__body { animation: pawn-hop-body .42s var(--ease); }
+@keyframes pawn-hop-body {
+  0%   { transform: scale(1) translateY(0); }
+  35%  { transform: scale(1.22) translateY(-22%); }
+  70%  { transform: scale(.9) translateY(4%); }
+  100% { transform: scale(1) translateY(0); }
+}
+.pawn.is-win .pawn__body { animation: pawn-win 1.1s var(--ease) infinite; }
+@keyframes pawn-win {
+  0%,100% { transform: scale(1) rotate(0); }
+  25%     { transform: scale(1.18) rotate(-8deg); }
+  75%     { transform: scale(1.18) rotate(8deg); }
+}
+
+/* ---------------- стены ---------------- */
+
+.walls-layer { pointer-events: none; }
+
+.wall {
+  position: absolute;
+  border-radius: calc(var(--gap) * .42);
+  transform-origin: center;
+  z-index: 3;
+}
+.wall--h {
+  left: calc(var(--c) * var(--step));
+  top: calc(var(--r) * var(--step) + var(--cell));
+  width: calc(2 * var(--cell) + var(--gap));
+  height: var(--gap);
+}
+.wall--v {
+  left: calc(var(--c) * var(--step) + var(--cell));
+  top: calc(var(--r) * var(--step));
+  width: var(--gap);
+  height: calc(2 * var(--cell) + var(--gap));
+}
+
+.wall__core {
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.45),
+    inset 0 -2px 4px rgba(0,0,0,.45);
+}
+.wall--h .wall__core { background: linear-gradient(180deg, var(--w-hi), var(--w-lo)); }
+.wall--v .wall__core { background: linear-gradient(90deg, var(--w-hi), var(--w-lo)); }
+
+.wall--p0 {
+  --w-hi: var(--sk0-hi, #f87171);
+  --w-lo: var(--sk0-lo, #991b1b);
+  --w-glow: var(--sk0-glow, rgba(220,38,38,.55));
+}
+.wall--p1 {
+  --w-hi: var(--sk1-hi, #fafafa);
+  --w-lo: var(--sk1-lo, #71717a);
+  --w-glow: var(--sk1-glow, rgba(228,228,231,.42));
+}
+
+.wall__glow {
+  position: absolute; inset: -2px;
+  border-radius: inherit;
+  box-shadow: 0 0 14px var(--w-glow), 0 4px 12px rgba(0,0,0,.55);
+  opacity: .55;
+}
+.wall__seam {
+  position: absolute;
+  background: rgba(0,0,0,.35);
+  border-radius: 99px;
+}
+.wall--h .wall__seam { left: 50%; top: 18%; bottom: 18%; width: 1px; transform: translateX(-.5px); }
+.wall--v .wall__seam { top: 50%; left: 18%; right: 18%; height: 1px; transform: translateY(-.5px); }
+
+/* — анимация постройки — */
+
+.wall.is-building { animation: wall-pop .62s var(--ease) both; }
+.wall--h.is-building { animation-name: wall-pop-h; }
+.wall--v.is-building { animation-name: wall-pop-v; }
+
+@keyframes wall-pop-h {
+  0%   { transform: scaleX(.04) scaleY(.35); opacity: 0; filter: brightness(3.4) saturate(1.6); }
+  22%  { transform: scaleX(.5)  scaleY(.6);  opacity: 1; filter: brightness(2.6); }
+  52%  { transform: scaleX(1.05) scaleY(1.7); filter: brightness(1.9); }
+  74%  { transform: scaleX(.99) scaleY(.86); filter: brightness(1.25); }
+  100% { transform: scaleX(1) scaleY(1); filter: brightness(1); }
+}
+@keyframes wall-pop-v {
+  0%   { transform: scaleY(.04) scaleX(.35); opacity: 0; filter: brightness(3.4) saturate(1.6); }
+  22%  { transform: scaleY(.5)  scaleX(.6);  opacity: 1; filter: brightness(2.6); }
+  52%  { transform: scaleY(1.05) scaleX(1.7); filter: brightness(1.9); }
+  74%  { transform: scaleY(.99) scaleX(.86); filter: brightness(1.25); }
+  100% { transform: scaleY(1) scaleX(1); filter: brightness(1); }
+}
+
+.wall.is-building .wall__glow { animation: wall-flash .62s var(--ease) both; }
+@keyframes wall-flash {
+  0%   { opacity: 1; box-shadow: 0 0 40px 10px var(--w-glow); }
+  40%  { opacity: 1; box-shadow: 0 0 30px 4px var(--w-glow); }
+  100% { opacity: .55; box-shadow: 0 0 14px var(--w-glow), 0 4px 12px rgba(0,0,0,.55); }
+}
+
+/* — призрак стены под курсором — */
+
+.wall--ghost { z-index: 4; opacity: .95; }
+.wall--ghost .wall__core {
+  background: none;
+  border: 1.5px dashed var(--g-color);
+  background-color: color-mix(in srgb, var(--g-color) 26%, transparent);
+  box-shadow: none;
+  animation: ghost-breathe 1.5s var(--ease) infinite;
+}
+.wall--ghost.is-bad { --g-color: #ef4444; }
+.wall--ghost.is-bad .wall__core { border-style: solid; }
+.wall--ghost.is-ok--p0 { --g-color: #f87171; }
+.wall--ghost.is-ok--p1 { --g-color: #e4e4e7; }
+@keyframes ghost-breathe { 0%,100% { opacity: .75; } 50% { opacity: 1; } }
+
+.wall--ghost.is-armed .wall__core { animation: none; opacity: 1; border-style: solid; }
+
+/* значок «на сколько удлинится путь соперника» */
+.ghost-tag {
+  position: absolute;
+  z-index: 6;
+  transform: translate(-50%, -50%);
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 22px; padding: 0 8px;
+  border-radius: 99px;
+  font-size: 11px; font-weight: 800;
+  font-family: var(--mono);
+  background: rgba(9,9,11,.92);
+  border: 1px solid var(--border-soft);
+  color: var(--fg);
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0,0,0,.6);
+  animation: fade-in .12s var(--ease);
+}
+.ghost-tag.is-good { border-color: rgba(34,197,94,.6); color: #86efac; }
+.ghost-tag.is-bad  { border-color: rgba(220,38,38,.6); color: #fca5a5; }
+
+/* ---------------- эффекты ---------------- */
+
+.fx-layer { pointer-events: none; z-index: 8; }
+
+.fx-shock {
+  position: absolute;
+  width: calc(var(--cell) * .5); height: calc(var(--cell) * .5);
+  margin-left: calc(var(--cell) * -.25);
+  margin-top: calc(var(--cell) * -.25);
+  border-radius: 50%;
+  border: 2px solid var(--fx-color, rgba(255,255,255,.8));
+  animation: shock 560ms var(--ease) forwards;
+}
+@keyframes shock {
+  0%   { transform: scale(.2); opacity: .95; border-width: 3px; }
+  100% { transform: scale(4.4); opacity: 0; border-width: .5px; }
+}
+
+.fx-dust {
+  position: absolute;
+  width: calc(var(--cell) * .1); height: calc(var(--cell) * .1);
+  border-radius: 50%;
+  background: var(--fx-color, rgba(255,255,255,.8));
+  opacity: .9;
+}
+
+.fx-flash {
+  position: absolute;
+  border-radius: 99px;
+  background: #fff;
+  filter: blur(2px);
+  animation: fx-flash 320ms var(--ease) forwards;
+}
+@keyframes fx-flash {
+  0%   { opacity: .95; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.6); }
+}
+
+.fx-confetti {
+  position: absolute;
+  width: 7px; height: 12px;
+  border-radius: 2px;
+  will-change: transform, opacity;
+}
+
+/* ---------------- зона наведения ---------------- */
+
+.hit-layer { z-index: 5; cursor: pointer; }
+.hit-layer.is-locked { cursor: default; }
+
+/* ---------------- панель игры ---------------- */
+
+.game-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .game-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.side { display: flex; flex-direction: column; gap: 14px; }
+
+.pcard {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card-2);
+  position: relative;
+  overflow: hidden;
+  transition: border-color .25s var(--ease), background .25s var(--ease);
+}
+.pcard.is-turn { border-color: rgba(220,38,38,.5); background: linear-gradient(100deg, rgba(220,38,38,.10), var(--card-2) 60%); }
+.pcard.is-turn.pcard--p1 { border-color: rgba(228,228,231,.4); background: linear-gradient(100deg, rgba(228,228,231,.08), var(--card-2) 60%); }
+.pcard__name { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.pcard__meta { font-size: 11.5px; color: var(--muted-2); margin-top: 2px; }
+
+.pcard__clock {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 15px; font-weight: 700;
+  color: var(--muted);
+  min-width: 44px; text-align: right;
+}
+.pcard__clock.is-low { color: var(--red-hi); animation: pulse-dot .8s infinite; }
+
+/* полоска оставшихся стен */
+.wallbar { display: flex; gap: 3px; margin-top: 7px; flex-wrap: wrap; }
+.wallbar i {
+  width: 9px; height: 15px;
+  border-radius: 2px;
+  background: var(--wb-color, var(--muted-3));
+  opacity: .28;
+  transition: opacity .3s var(--ease), transform .3s var(--spring);
+}
+.wallbar i.is-on { opacity: 1; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+.wallbar i.is-spent { transform: scaleY(.35); }
+.pcard--p0 .wallbar { --wb-color: var(--red); }
+.pcard--p1 .wallbar { --wb-color: var(--silver); }
+
+/* чат */
+.chat { display: flex; flex-direction: column; height: 100%; min-height: 200px; }
+.chat__list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 7px;
+  padding-right: 4px;
+  max-height: 240px;
+}
+.chat__msg { font-size: 13px; line-height: 1.4; word-break: break-word; }
+.chat__from { font-weight: 700; margin-right: 6px; }
+.chat__from.p0 { color: #fca5a5; }
+.chat__from.p1 { color: #e4e4e7; }
+.chat__msg.is-sys { color: var(--muted-2); font-size: 12px; font-style: italic; }
+.chat__form { display: flex; gap: 8px; margin-top: 10px; }
+.chat__form .input { height: 38px; }
+
+/* панель действий над доской */
+.board-bar {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: var(--board-max, 660px);
+}
+
+.turn-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 34px; padding: 0 14px;
+  border-radius: 99px;
+  font-size: 13px; font-weight: 700;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--muted);
+  transition: all .25s var(--ease);
+}
+.turn-pill.is-me { border-color: rgba(220,38,38,.5); color: #fff; background: rgba(220,38,38,.14); }
+.turn-pill.is-thinking { border-color: rgba(234,179,8,.4); color: #fde047; background: rgba(234,179,8,.1); }
+.turn-pill__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.turn-pill.is-me .turn-pill__dot,
+.turn-pill.is-thinking .turn-pill__dot { animation: pulse-dot 1.2s infinite; }
+
+/* оверлей завершения */
+.overlay {
+  position: absolute; inset: 0;
+  z-index: 20;
+  display: grid; place-items: center;
+  border-radius: var(--radius-2xl);
+  background: rgba(9,9,11,.78);
+  backdrop-filter: blur(8px);
+  animation: fade-in .3s var(--ease);
+  padding: 20px;
+}
+.overlay__box {
+  text-align: center;
+  animation: modal-in .45s var(--spring);
+  max-width: 340px;
+}
+.overlay__title {
+  font-size: clamp(28px, 6vw, 44px);
+  font-weight: 900; letter-spacing: -.03em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+.overlay__title.is-win { color: var(--red-hi); text-shadow: 0 0 40px rgba(220,38,38,.6); }
+.overlay__title.is-lose { color: var(--muted); }
+.overlay__sub { margin-top: 10px; font-size: 14px; color: var(--muted); }
+.overlay__actions { margin-top: 22px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+
+/* «думает» индикатор бота */
+.thinking { display: inline-flex; gap: 3px; align-items: center; }
+.thinking i {
+  width: 4px; height: 4px; border-radius: 50%; background: currentColor;
+  animation: think 1.1s infinite var(--ease);
+}
+.thinking i:nth-child(2) { animation-delay: .15s; }
+.thinking i:nth-child(3) { animation-delay: .3s; }
+@keyframes think {
+  0%, 60%, 100% { opacity: .25; transform: translateY(0); }
+  30%           { opacity: 1; transform: translateY(-3px); }
+}
+
+/* координаты по краям доски */
+.b-coord--file {
+  top: 100%;
+  margin-top: 4px;
+  left: calc(var(--c) * var(--step));
+  width: var(--cell);
+  text-align: center;
+}
+.b-coord--rank {
+  left: calc(var(--frame-pad, 14px) * -1 + 1px);
+  top: calc(var(--r) * var(--step));
+  height: var(--cell);
+  width: calc(var(--frame-pad, 14px) - 3px);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (max-width: 560px) {
+  .board-frame { --frame-pad: 13px; }
+  .game-grid { gap: 14px; }
+}
