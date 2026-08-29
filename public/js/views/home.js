@@ -1,6 +1,6 @@
 /* Главный экран: быстрый вход и список открытых комнат. */
 
-import { MODE_LIST, getMode, seatCount } from '/shared/quoridor.js';
+import { MODE_LIST, MODES, getMode, seatCount } from '/shared/quoridor.js';
 import { h, clear, icon, toast, modal, plural, timeAgo } from '../ui.js';
 import { store } from '../store.js';
 import { sfx } from '../sound.js';
@@ -67,10 +67,19 @@ export function renderHome(mount, startTab) {
     resumeBox,
     h('button', { class: 'btn btn--primary btn--lg btn--block', onClick: quickCreate },
       icon('plus', 20), 'Создать игру'),
-    h('button', { class: 'btn btn--ghost btn--block', onClick: () => setTab('rooms') },
-      icon('users'), 'Открытые комнаты'),
-    h('a', { class: 'btn btn--outline btn--block', href: '#/bot' }, icon('bot'), 'Играть с ботом'),
-    h('div', { class: 'divider', style: { marginTop: 'auto' } }),
+    h('div', { class: 'grid-2', style: { gap: '10px' } },
+      h('button', { class: 'btn btn--ghost', onClick: () => setTab('rooms') },
+        icon('users'), 'Комнаты'),
+      h('a', { class: 'btn btn--ghost', href: '#/bot' }, icon('bot'), 'С ботом')),
+    h('div', { class: 'divider' }),
+    h('div', { class: 'eyebrow' }, 'Режимы'),
+    h('div', { class: 'mode-strip' },
+      MODE_LIST.map((m) => h('div', { class: 'mode-chip', title: MODE_TEXTS[m.id] || m.hint },
+        modeGlyph(m.id, 30),
+        h('div', { class: 'mode-chip__text' },
+          h('b', {}, MODE_TITLES[m.id] || m.label),
+          h('span', {}, seatCount(m.id) + ' ' + plural(seatCount(m.id), 'игрок', 'игрока', 'игроков')))))),
+    h('div', { class: 'divider' }),
     h('div', { class: 'eyebrow' }, 'Функционал'),
     h('ul', { class: 'stack stack--sm dim-2' },
       li('создайте комнату и поделитесь ссылкой с игроками'),
@@ -256,6 +265,7 @@ export async function createDialog(preset = null) {
     clear(modeBox);
     for (const m of MODE_LIST) {
       const active = m.id === state.mode;
+      const n = seatCount(m.id);
       modeBox.append(h('button', {
         class: `mode-card ${active ? 'is-active' : ''}`,
         onClick: () => {
@@ -265,11 +275,13 @@ export async function createDialog(preset = null) {
           paintWalls();
         },
       },
-        h('div', { class: 'hstack' },
-          h('div', { class: 'mode-card__title' }, m.label),
-          h('div', { class: 'spacer' }),
-          h('span', { class: 'badge' }, `${seatCount(m.id)} игрока`.replace('4 игрока', '4 игроков'))),
-        h('div', { class: 'mode-card__hint' }, m.hint)));
+        h('div', { class: 'mode-card__glyph' }, modeGlyph(m.id, 52)),
+        h('div', { class: 'mode-card__body' },
+          h('div', { class: 'mode-card__title' }, MODE_TITLES[m.id] || m.label),
+          h('div', { class: 'mode-card__hint' }, MODE_TEXTS[m.id] || m.hint)),
+        h('div', { class: 'mode-card__meta' },
+          h('span', { class: 'badge' }, n + ' ' + plural(n, 'игрок', 'игрока', 'игроков')),
+          h('span', { class: 'badge' }, m.walls[0] + ' ' + plural(m.walls[0], 'стена', 'стены', 'стен')))));
     }
   }
 
@@ -291,7 +303,7 @@ export async function createDialog(preset = null) {
       timeSeg.append(h('button', {
         class: `seg__btn ${state.turnTimeSec === v ? 'is-active' : ''}`,
         onClick: () => { state.turnTimeSec = v; paintTime(); },
-      }, v === 0 ? '∞' : (v >= 60 ? `${v / 60} мин` : `${v} с`), h('span', { class: 'sr' }, label)));
+      }, label));
     }
   }
 
@@ -326,6 +338,74 @@ export async function createDialog(preset = null) {
     isPrivate: privSw.checked,
     password: privSw.checked ? passInput.value : '',
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Названия и схемы режимов
+ * ------------------------------------------------------------------ */
+
+const MODE_TITLES = {
+  duel: 'Один на один',
+  trio: 'Трое, каждый за себя',
+  ffa: 'Четверо, каждый за себя',
+  duo: 'Команды, два на два',
+  siege: 'Двое против одного',
+};
+
+const MODE_TEXTS = {
+  duel: 'Классика. Вы снизу, соперник сверху, идёте навстречу.',
+  trio: 'Три фишки с трёх сторон, союзов нет.',
+  ffa: 'Четыре фишки со всех сторон, стен мало, доска тесная.',
+  duo: 'Партнёры стоят напротив. Побеждает команда, чей игрок дошёл первым.',
+  siege: 'Одиночка снизу ходит дважды за ход и получает вдвое больше стен.',
+};
+
+const TEAM_COLORS = ['#dc2626', '#e4e4e7', '#3b82f6', '#f59e0b'];
+const GLYPH_SPOT = { 0: [20, 33], 1: [20, 7], 2: [7, 20], 3: [33, 20] };
+
+/** Мини-схема доски: кто где стоит и кто с кем в команде. */
+function modeGlyph(modeId, size = 52) {
+  const mode = MODES[modeId];
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 40 40');
+  svg.setAttribute('width', size);
+  svg.setAttribute('height', size);
+  svg.classList.add('mode-glyph');
+
+  const node = (tag, attrs) => {
+    const el = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    return el;
+  };
+
+  svg.append(node('rect', {
+    x: 2, y: 2, width: 36, height: 36, rx: 7,
+    fill: '#141418', stroke: 'rgba(255,255,255,.08)',
+  }));
+
+  mode.seats.forEach((seatId, i) => {
+    const [cx, cy] = GLYPH_SPOT[seatId];
+    const team = mode.teams[i];
+    const color = TEAM_COLORS[team % TEAM_COLORS.length];
+    const mate = mode.teams.findIndex((t, j) => t === team && j !== i);
+    if (mate > i) {
+      const [mx, my] = GLYPH_SPOT[mode.seats[mate]];
+      svg.append(node('line', {
+        x1: cx, y1: cy, x2: mx, y2: my,
+        stroke: color, 'stroke-width': 1.4, 'stroke-dasharray': '2 2', opacity: .55,
+      }));
+    }
+    svg.append(node('circle', {
+      cx, cy, r: mode.movesPerTurn[i] > 1 ? 5.6 : 4.2, fill: color,
+    }));
+    if (mode.movesPerTurn[i] > 1) {
+      svg.append(node('circle', {
+        cx, cy, r: 8, fill: 'none', stroke: color, 'stroke-width': 1, opacity: .5,
+      }));
+    }
+  });
+  return svg;
 }
 
 function tile(k, v) {

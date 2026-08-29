@@ -1,7 +1,7 @@
 /* Общие блоки игрового экрана: карточки игроков, чат, панели. */
 
 import { h, clear, icon, initials } from '../ui.js';
-import { paintSkin, seatSkin } from '../skins.js';
+import { paintSkin, pawnSkin } from '../skins.js';
 
 export class PlayerCard {
   constructor() {
@@ -17,7 +17,7 @@ export class PlayerCard {
   }
 
   update(o = {}) {
-    const skin = o.skin || seatSkin(0);
+    const skin = o.skin || pawnSkin('classic', 0);
     paintSkin(this.el, skin);
     paintSkin(this.avatar, skin);
 
@@ -26,7 +26,6 @@ export class PlayerCard {
     clear(this.name);
     this.name.append(name);
     if (o.teamLabel) this.name.append(h('span', { class: 'badge' }, o.teamLabel));
-    if (o.isMe) this.name.append(h('span', { class: 'badge badge--red-soft' }, 'вы'));
     if (o.isHost) this.name.append(h('span', { class: 'badge' }, 'хост'));
     if (o.isBot) this.name.append(h('span', { class: 'badge' }, 'бот'));
     if (o.connected === false) this.name.append(h('span', { class: 'badge badge--warn' }, 'нет связи'));
@@ -34,7 +33,9 @@ export class PlayerCard {
 
     this.meta.textContent = o.sub || '';
     this.el.classList.toggle('is-turn', !!o.isTurn);
+    this.el.classList.toggle('is-me', !!o.isMe);
     this.el.classList.toggle('is-out', !!o.out);
+    this.el.classList.toggle('is-empty', !o.name);
 
     if (o.clockMs === null || o.clockMs === undefined) {
       this.clock.textContent = '';
@@ -73,6 +74,7 @@ export class Chat {
       },
     }, this.input, h('button', { class: 'btn btn--icon btn--ghost', type: 'submit' }, icon('send')));
     this.el = h('div', { class: 'chat' }, this.list, this.form);
+    this.panel = null;
     this.seen = new Set();
   }
 

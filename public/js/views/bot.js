@@ -5,7 +5,7 @@ import {
 } from '/shared/quoridor.js';
 import { LEVELS, LEVEL_BY_ID, thinkDelay, chooseMove } from '/shared/ai.js';
 
-import { h, clear, icon, toast, plural } from '../ui.js';
+import { h, clear, icon, toast, plural, coinReward } from '../ui.js';
 import { store } from '../store.js';
 import { sfx } from '../sound.js';
 import { botReward, fmt } from '../economy.js';
@@ -203,7 +203,9 @@ function renderGame(mount, cfg, onBack) {
       me: cfg.mySeat,
       interactive: myTurn,
       lastMove: game.history[game.history.length - 1] || null,
-      skins: [cfg.mySeat === 0 ? store.skin : null, cfg.mySeat === 1 ? store.skin : null],
+      skins: [0, 1].map((seat) => (seat === cfg.mySeat
+        ? { pawn: store.pawn, wall: store.wall }
+        : {})),
       silent: opts.silent,
     });
 
@@ -282,8 +284,7 @@ function renderGame(mount, cfg, onBack) {
         reason === 'stuck' ? 'Бот не нашёл ход'
           : iWon ? `Вы обыграли уровень «${level.label}» за ${game.history.length} ходов`
             : `Бот «${level.label}» дошёл первым`),
-      h('div', { class: 'overlay__sub', style: { color: 'var(--ok)', fontWeight: '700' } },
-        `Начислено ${fmt(gain)}`),
+      coinReward(gain),
       h('div', { class: 'overlay__actions' },
         h('button', { class: 'btn btn--primary', onClick: restart }, icon('rotate'), 'Ещё партия'),
         h('button', { class: 'btn btn--ghost', onClick: onBack }, icon('back'), 'Сменить уровень'))));

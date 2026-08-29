@@ -210,3 +210,56 @@ export function timeAgo(ts) {
   const hr = Math.round(m / 60);
   return `${hr} ${plural(hr, 'час', 'часа', 'часов')} назад`;
 }
+
+/* ---------------- значок валюты ---------------- */
+
+/**
+ * Валюта это стены, поэтому и значок выглядит как кладка:
+ * три ряда кирпичей со смещением.
+ */
+export function wallCoin(size = 16) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 20 20');
+  svg.setAttribute('width', size);
+  svg.setAttribute('height', size);
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add('wall-coin');
+  svg.innerHTML = `
+    <rect x="1" y="2.5" width="18" height="15" rx="3" fill="var(--coin-bg, #a16207)"/>
+    <g fill="var(--coin-fg, #fde047)">
+      <rect x="2.6" y="4.1" width="6.6" height="3.4" rx="1"/>
+      <rect x="10.4" y="4.1" width="6.6" height="3.4" rx="1"/>
+      <rect x="2.6" y="8.3" width="4.4" height="3.4" rx="1"/>
+      <rect x="8.2" y="8.3" width="6.6" height="3.4" rx="1"/>
+      <rect x="16" y="8.3" width="1" height="3.4" rx=".5"/>
+      <rect x="2.6" y="12.5" width="6.6" height="3.4" rx="1"/>
+      <rect x="10.4" y="12.5" width="6.6" height="3.4" rx="1"/>
+    </g>`;
+  return svg;
+}
+
+/**
+ * Блок начисления валюты с анимацией: значок подпрыгивает,
+ * число набегает от нуля.
+ */
+export function coinReward(amount, label = 'Начислено') {
+  const num = h('b', { class: 'reward__num' }, '0');
+  const el = h('div', { class: 'reward' },
+    wallCoin(22),
+    h('span', { class: 'reward__label' }, label),
+    num,
+    h('span', { class: 'reward__unit' }, 'стен'));
+
+  const start = performance.now();
+  const dur = 900;
+  const tick = (t) => {
+    const k = Math.min(1, (t - start) / dur);
+    const eased = 1 - (1 - k) ** 3;
+    num.textContent = String(Math.round(amount * eased));
+    if (k < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  setTimeout(() => { num.textContent = String(amount); }, dur + 60);
+  return el;
+}

@@ -12,8 +12,9 @@ const DEFAULTS = {
   lastRoom: null,
   botLevel: 'medium',
   botSide: 0,
-  skin: 'classic',
-  owned: ['classic', 'chalk'],
+  pawn: 'classic',
+  wall: 'classic',
+  owned: { pawns: ['classic'], walls: ['classic'], bundles: [] },
   coins: 120,
   stats: {
     bot: { easy: [0, 0], medium: [0, 0], hard: [0, 0], expert: [0, 0] },
@@ -22,7 +23,7 @@ const DEFAULTS = {
 };
 
 function blank() {
-  return { ...DEFAULTS, owned: DEFAULTS.owned.slice(), stats: structuredClone(DEFAULTS.stats) };
+  return { ...DEFAULTS, owned: structuredClone(DEFAULTS.owned), stats: structuredClone(DEFAULTS.stats) };
 }
 
 function read() {
@@ -30,8 +31,14 @@ function read() {
     const raw = localStorage.getItem(KEY) || localStorage.getItem(OLD_KEY);
     if (!raw) return blank();
     const parsed = JSON.parse(raw);
-    const owned = Array.isArray(parsed.owned) ? parsed.owned.slice() : DEFAULTS.owned.slice();
-    for (const id of DEFAULTS.owned) if (!owned.includes(id)) owned.push(id);
+    const src = (parsed.owned && !Array.isArray(parsed.owned)) ? parsed.owned : {};
+    const owned = {
+      pawns: Array.isArray(src.pawns) ? src.pawns.slice() : ['classic'],
+      walls: Array.isArray(src.walls) ? src.walls.slice() : ['classic'],
+      bundles: Array.isArray(src.bundles) ? src.bundles.slice() : [],
+    };
+    if (!owned.pawns.includes('classic')) owned.pawns.push('classic');
+    if (!owned.walls.includes('classic')) owned.walls.push('classic');
     return {
       ...DEFAULTS,
       ...parsed,
@@ -93,11 +100,16 @@ export const store = {
   get botSide() { return state.botSide; },
   set botSide(v) { state.botSide = v === 1 ? 1 : 0; write(); },
 
-  get skin() { return state.skin || 'classic'; },
-  set skin(v) { state.skin = String(v || 'classic'); write(); },
+  get pawn() { return state.pawn || 'classic'; },
+  set pawn(v) { state.pawn = String(v || 'classic'); write(); },
+
+  get wall() { return state.wall || 'classic'; },
+  set wall(v) { state.wall = String(v || 'classic'); write(); },
 
   get owned() { return state.owned; },
-  has(id) { return state.owned.includes(id); },
+  hasPawn(id) { return state.owned.pawns.includes(id); },
+  hasWall(id) { return state.owned.walls.includes(id); },
+  hasBundle(id) { return state.owned.bundles.includes(id); },
 
   get coins() { return state.coins; },
 
@@ -111,12 +123,21 @@ export const store = {
     return n;
   },
 
-  /** Купить скин. Возвращает true, если хватило валюты. */
-  buy(id, price) {
-    if (state.owned.includes(id)) return true;
+  /**
+   * Купить предмет. kind: pawn | wall | bundle.
+   * Комплект открывает и фишку, и стену.
+   */
+  buy(kind, id, price, parts = null) {
+    const list = kind === 'wall' ? state.owned.walls
+      : kind === 'bundle' ? state.owned.bundles : state.owned.pawns;
+    if (list.includes(id)) return true;
     if (state.coins < price) return false;
     state.coins -= price;
-    state.owned.push(id);
+    list.push(id);
+    if (kind === 'bundle' && parts) {
+      if (!state.owned.pawns.includes(parts.pawn)) state.owned.pawns.push(parts.pawn);
+      if (!state.owned.walls.includes(parts.wall)) state.owned.walls.push(parts.wall);
+    }
     write();
     window.dispatchEvent(new CustomEvent('coridor:coins', { detail: { coins: state.coins, gained: -price } }));
     return true;

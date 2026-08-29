@@ -45,6 +45,14 @@ function sanitizeSkin(raw) {
   return /^[a-z0-9_-]{2,24}$/.test(s) ? s : null;
 }
 
+/** Косметика игрока: отдельно фишка и стена. */
+function sanitizeLook(msg, prev = null) {
+  return {
+    pawn: sanitizeSkin(msg.pawn) || prev?.pawn || null,
+    wall: sanitizeSkin(msg.wall) || prev?.wall || null,
+  };
+}
+
 function now() { return Date.now(); }
 
 function clampInt(v, min, max, dflt) {
@@ -198,7 +206,7 @@ export class Hub {
 
     client.id = wanted || ('c' + Math.random().toString(36).slice(2, 12));
     client.name = sanitizeName(msg.name);
-    client.skin = sanitizeSkin(msg.skin);
+    client.look = sanitizeLook(msg);
     this.clients.set(client.id, client);
 
     let restored = null;
@@ -208,7 +216,7 @@ export class Hub {
       m.connected = true;
       m.disconnectAt = null;
       m.name = client.name;
-      m.skin = client.skin;
+      m.look = client.look;
       client.room = room;
       restored = room;
       break;
@@ -239,11 +247,11 @@ export class Hub {
 
   onProfile(client, msg) {
     client.name = sanitizeName(msg.name, client.name);
-    if (msg.skin !== undefined) client.skin = sanitizeSkin(msg.skin);
+    if (msg.pawn !== undefined || msg.wall !== undefined) client.look = sanitizeLook(msg, client.look);
     const room = client.room;
     if (room) {
       const m = room.members.get(client.id);
-      if (m) { m.name = client.name; m.skin = client.skin; this.pushRoom(room); }
+      if (m) { m.name = client.name; m.look = client.look; this.pushRoom(room); }
       this.broadcastLobby();
     }
     this.send(client, { type: 'profile:ok', name: client.name });
@@ -360,7 +368,7 @@ export class Hub {
     const m = {
       id: client.id,
       name: client.name,
-      skin: client.skin || null,
+      look: client.look || null,
       seat,
       connected: true,
       disconnectAt: null,
@@ -738,7 +746,7 @@ export class Hub {
         capacity: room.seats.length,
         score: room.score,
         members: [...room.members.values()].map((m) => ({
-          id: m.id, name: m.name, skin: m.skin, seat: m.seat,
+          id: m.id, name: m.name, look: m.look, seat: m.seat,
           connected: m.connected, disconnectAt: m.disconnectAt,
         })),
         rematch: [...room.rematch],

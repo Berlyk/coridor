@@ -7,7 +7,7 @@ import {
 import { h, clear } from './ui.js';
 import { store } from './store.js';
 import { sfx } from './sound.js';
-import { skinFor, seatSkin, paintSkin } from './skins.js';
+import { pawnSkin, wallSkin, paintSkin } from './skins.js';
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
@@ -37,6 +37,7 @@ export class Board {
     this.gap = 0;
     this.lastMove = null;
     this.skins = [];
+    this.wallSkins = [];
     this.chosenSkins = [];
 
     this.root = h('div', { class: 'board-frame' });
@@ -196,22 +197,20 @@ export class Board {
     }
   }
 
-  /** Скин игрока: свой выбор, иначе цвет места. Совпадения разводим. */
+  /**
+   * Косметика каждого игрока: своя фишка и своя стена.
+   * chosen приходит как [{pawn, wall}] по индексу игрока.
+   */
   _resolveSkins(game, chosen = []) {
-    const used = new Set();
-    const out = [];
+    const pawns = [];
+    const walls = [];
     for (let i = 0; i < game.players.length; i++) {
       const seat = game.players[i].seat;
-      let skin = chosen[i] ? skinFor(chosen[i]) : null;
-      if (!skin || used.has(skin.id)) skin = seatSkin(seat);
-      if (used.has(skin.id)) {
-        const alt = [0, 1, 2, 3].map((s) => seatSkin(s)).find((s) => !used.has(s.id));
-        if (alt) skin = alt;
-      }
-      used.add(skin.id);
-      out.push(skin);
+      const pick = chosen[i] || {};
+      pawns.push(pawnSkin(pick.pawn, seat));
+      walls.push(wallSkin(pick.wall, seat));
     }
-    return out;
+    return { pawns, walls };
   }
 
   /* ---------------- обновление состояния ---------------- */
@@ -240,7 +239,9 @@ export class Board {
     if (opts.lastMove !== undefined) this.lastMove = opts.lastMove;
     if (opts.skins) this.chosenSkins = opts.skins;
 
-    this.skins = this._resolveSkins(game, this.chosenSkins);
+    const resolved = this._resolveSkins(game, this.chosenSkins);
+    this.skins = resolved.pawns;
+    this.wallSkins = resolved.walls;
     if (rebuilt) this._buildPawns(game.players.length);
 
     this._measure();
@@ -315,9 +316,9 @@ export class Board {
 
   _makeWall(w) {
     const v = this._viewWall(w.r, w.c, w.o);
-    const skin = this.skins[w.by] || this.skins[0] || seatSkin(0);
+    const skin = this.wallSkins?.[w.by] || wallSkin('classic', 0);
     const el = h('div', {
-      class: `wall wall--${v.o === H ? 'h' : 'v'} wall--tex-${skin.wall}`,
+      class: `wall wall--${v.o === H ? 'h' : 'v'} wall--tex-${skin.tex}`,
       style: { '--r': v.r, '--c': v.c },
     },
       h('div', { class: 'wall__glow' }),
@@ -392,7 +393,7 @@ export class Board {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     p.setAttribute('d', 'M' + pts.join(' L'));
-    p.setAttribute('stroke', (this.skins[idx] || seatSkin(0)).hi);
+    p.setAttribute('stroke', (this.skins[idx] || pawnSkin('classic', 0)).hi);
     svg.append(p);
     layer.append(svg);
   }
@@ -534,7 +535,7 @@ export class Board {
     const seat = g.turn;
     const chk = checkWall(g, seat, target.r, target.c, target.o);
     const v = this._viewWall(target.r, target.c, target.o);
-    const skin = this.skins[seat] || seatSkin(0);
+    const skin = this.wallSkins?.[seat] || wallSkin('classic', 0);
 
     if (!this.ghostEl) {
       this.ghostEl = h('div', { class: 'wall wall--ghost' }, h('div', { class: 'wall__core' }));
@@ -599,7 +600,7 @@ export class Board {
     sfx.wall();
     this.shake();
 
-    const skin = this.skins[w.by] || seatSkin(0);
+    const skin = this.wallSkins?.[w.by] || wallSkin('classic', 0);
     const color = skin.hi;
     const step = this.cell + this.gap;
     const v = this._viewWall(w.r, w.c, w.o);
@@ -657,7 +658,7 @@ export class Board {
   }
 
   celebrate(playerIndex) {
-    const skin = this.skins[playerIndex] || seatSkin(0);
+    const skin = this.skins[playerIndex] || pawnSkin('classic', 0);
     const colors = [skin.hi, skin.mid, '#ffffff', skin.lo];
     const rect = this.board.getBoundingClientRect();
     for (let i = 0; i < 70; i++) {

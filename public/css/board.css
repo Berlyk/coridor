@@ -488,7 +488,8 @@
   .game-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
-.side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.side { display: flex; flex-direction: column; gap: 14px; min-width: 0; height: 100%; }
+.game-grid { align-items: stretch; }
 
 .pcard {
   display: flex; align-items: center; gap: 12px;
@@ -513,6 +514,14 @@
     color-mix(in srgb, var(--sk-mid, var(--red)) 12%, transparent), var(--card-2) 62%);
 }
 .pcard.is-out { opacity: .5; }
+.pcard.is-me {
+  border-color: color-mix(in srgb, var(--sk-mid, var(--red)) 40%, var(--border));
+  background: linear-gradient(100deg,
+    color-mix(in srgb, var(--sk-mid, var(--red)) 7%, transparent), var(--card-2) 55%);
+}
+.pcard.is-me::before { width: 4px; box-shadow: 0 0 12px var(--sk-glow, transparent); }
+.pcard.is-empty { opacity: .65; border-style: dashed; }
+.pcard.is-empty::before { opacity: .3; }
 .pcard__name { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .pcard__meta { font-size: 11.5px; color: var(--muted-2); margin-top: 2px; }
 .pcard__clock {
@@ -535,14 +544,15 @@
 .wallbar i.is-on { opacity: 1; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
 .wallbar i.is-spent { transform: scaleY(.35); }
 
-/* чат */
-.chat { display: flex; flex-direction: column; min-height: 180px; }
+/* чат: высота фиксированная, от числа сообщений не растёт */
+.chat { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .chat__list {
   flex: 1 1 auto;
+  min-height: 190px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   display: flex; flex-direction: column; gap: 7px;
   padding-right: 4px;
-  max-height: 240px;
 }
 .chat__msg { font-size: 13px; line-height: 1.4; word-break: break-word; }
 .chat__from { font-weight: 700; margin-right: 6px; }

@@ -1,10 +1,10 @@
 /* Онлайн-комната: лобби, партия, чат. */
 
 import { deserialize, distanceToGoal, getMode, isTeamMode } from '/shared/quoridor.js';
-import { h, clear, icon, toast, copyText, confirmDialog, plural } from '../ui.js';
+import { h, clear, icon, toast, copyText, confirmDialog, plural, coinReward } from '../ui.js';
 import { store } from '../store.js';
 import { sfx } from '../sound.js';
-import { onlineReward, fmt } from '../economy.js';
+import { onlineReward } from '../economy.js';
 import * as net from '../net.js';
 import { Board } from '../board.js';
 import { PlayerCard, Chat, panel, turnPill, gameLayout, rotateButton } from './game-ui.js';
@@ -40,23 +40,23 @@ export function renderRoom(mount, code) {
 
   const roomTitle = h('div', { class: 'h3' }, 'Подключение');
   const modeBadge = h('span', { class: 'badge' }, '');
-  const codeChip = h('button', {
-    class: 'btn btn--sm btn--ghost mono',
-    title: 'Скопировать код',
-    onClick: async () => { if (await copyText(code)) toast('Код скопирован', 'ok'); },
-  }, icon('copy', 14), code);
   const linkBtn = h('button', {
-    class: 'btn btn--sm btn--ghost',
+    class: 'iconbtn', title: 'Скопировать ссылку-приглашение',
     onClick: async () => {
       if (await copyText(`${location.origin}/#/room/${code}`)) toast('Ссылка скопирована', 'ok');
     },
-  }, icon('share', 14), 'Ссылка');
-  const manageBtn = h('button', { class: 'btn btn--sm btn--ghost', onClick: openManage },
-    icon('settings', 14), 'Управление');
-  const startBtn = h('button', { class: 'btn btn--sm btn--primary', onClick: () => net.send({ type: 'room:start' }) },
-    icon('play', 14), 'Начать партию');
-  const exitBtn = h('a', { class: 'btn btn--sm btn--outline', href: '#/', onClick: () => leaveRoom() },
-    icon('door', 14), 'Выйти');
+  }, icon('share', 16));
+  const manageBtn = h('button', {
+    class: 'iconbtn', title: 'Управление партией', onClick: openManage,
+  }, icon('settings', 16));
+  const exitBtn = h('a', {
+    class: 'iconbtn iconbtn--danger', title: 'Выйти из комнаты',
+    href: '#/', onClick: () => leaveRoom(),
+  }, icon('door', 16));
+  const startBtn = h('button', {
+    class: 'btn btn--sm btn--primary',
+    onClick: () => net.send({ type: 'room:start' }),
+  }, icon('play', 14), 'Начать партию');
 
   const headActions = h('div', { class: 'hstack hstack--wrap room-head__actions' });
 
@@ -78,8 +78,10 @@ export function renderRoom(mount, code) {
   stage.append(boardBar);
 
   const spectatorPanel = panel('Наблюдатели', spectatorBox);
+  const chatPanel = panel('Чат', chat.el);
+  chatPanel.classList.add('panel--grow');
 
-  const side = [seatBox, panel('Чат', chat.el), spectatorPanel];
+  const side = [seatBox, chatPanel, spectatorPanel];
 
   mount.append(head, gameLayout(stage, side));
   rotate.paint();
@@ -197,7 +199,10 @@ export function renderRoom(mount, code) {
 
   function skinList() {
     if (!room) return [];
-    return room.seats.map((id) => (id ? room.members.find((m) => m.id === id)?.skin : null) || null);
+    return room.seats.map((id) => {
+      const m = id ? room.members.find((x) => x.id === id) : null;
+      return m?.look || {};
+    });
   }
 
   function applyState(raw, silent) {
@@ -242,9 +247,11 @@ export function renderRoom(mount, code) {
     modeBadge.textContent = mode.label;
 
     clear(headActions);
-    headActions.append(codeChip, linkBtn);
-    if (isHost() && room.status !== 'playing') headActions.append(manageBtn, startBtn);
-    headActions.append(exitBtn);
+    if (isHost() && room.status !== 'playing') headActions.append(startBtn);
+    const tools = h('div', { class: 'iconbar' }, linkBtn);
+    if (isHost() && room.status !== 'playing') tools.append(manageBtn);
+    tools.append(exitBtn);
+    headActions.append(tools);
     startBtn.disabled = room.seats.some((s) => !s);
 
     paintSeats(mode);
@@ -290,7 +297,7 @@ export function renderRoom(mount, code) {
       const skin = board.skins[i];
 
       card.update({
-        name: m ? m.name : 'Свободное место',
+        name: m ? m.name : null,
         skin,
         isMe: m?.id === store.clientId,
         isHost: m?.id === room.hostId,
@@ -396,12 +403,12 @@ export function renderRoom(mount, code) {
     const spectator = seat === null;
     const iWon = !spectator && Array.isArray(m.winners) && m.winners.includes(seat);
 
+    let gain = 0;
     if (!spectator) {
       const rivals = Math.max(1, (room.seats.length || 2) - 1);
-      const gain = store.earn(onlineReward(iWon, rivals));
+      gain = store.earn(onlineReward(iWon, rivals));
       store.recordOnline(iWon);
       if (iWon) { sfx.win(); board.celebrate(seat); } else sfx.lose();
-      toast(`Начислено ${fmt(gain)}`, 'ok', 4000);
     } else sfx.notify();
 
     const reason = {
@@ -418,6 +425,7 @@ export function renderRoom(mount, code) {
         spectator ? 'Финал' : iWon ? 'Победа' : 'Поражение'),
       h('div', { class: 'overlay__sub' },
         `${(m.winnerNames || []).join(' и ') || m.teamName || 'Никто'}: ${reason}`),
+      gain ? coinReward(gain) : null,
       h('div', { class: 'overlay__actions' },
         seat !== null
           ? h('button', {

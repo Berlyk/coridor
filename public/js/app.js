@@ -12,7 +12,7 @@ import { renderRules } from './views/rules.js';
 import { renderShop } from './views/shop.js';
 import { renderDev } from './views/dev.js';
 import { openDoc } from './views/legal.js';
-import { skinFor, skinPreview } from './skins.js';
+import { pawnSkin, pawnPreview, PAWN_BY_ID, WALL_BY_ID } from './skins.js';
 import { fmt } from './economy.js';
 
 const viewRoot = document.getElementById('view');
@@ -21,7 +21,6 @@ const footRoot = document.getElementById('foot');
 
 let current = null;
 let connDot = null;
-let coinChip = null;
 
 /* ---------------- навигация ---------------- */
 
@@ -42,12 +41,8 @@ function renderNav(active) {
   }
   navRoot.append(h('div', { class: 'nav__sep' }));
 
-  coinChip = h('a', { class: 'coin-chip', href: '#/shop', title: 'Игровая валюта' },
-    h('span', { class: 'coin-icon coin-icon--sm' }),
-    h('span', {}, String(store.coins)));
-
   connDot = h('span', { class: 'conn-dot' });
-  navRoot.append(coinChip, h('button', {
+  navRoot.append(h('button', {
     class: 'nav__me',
     title: 'Профиль и настройки',
     onClick: openProfile,
@@ -56,10 +51,6 @@ function renderNav(active) {
     h('span', { class: 'nav__label' }, store.name),
     connDot));
   paintStatus();
-}
-
-function paintCoins() {
-  if (coinChip) coinChip.lastChild.textContent = String(store.coins);
 }
 
 function paintStatus() {
@@ -107,8 +98,7 @@ function renderFooter() {
       link('Пользовательское соглашение', 'terms'),
       link('Публичная оферта', 'offer')),
     h('div', { class: 'foot__legal' },
-      h('span', {}, '© 2026 КОРИДОР. Все права защищены.'),
-      h('span', { class: 'foot__stats', id: 'server-stats' }, '')));
+      h('span', {}, '© 2026 КОРИДОР. Все права защищены.')));
 }
 
 /* ---------------- профиль ---------------- */
@@ -123,17 +113,18 @@ async function openProfile() {
 
   const s = store.stats;
   const totalBot = Object.values(s.bot).reduce((a, r) => [a[0] + r[0], a[1] + r[1]], [0, 0]);
-  const skin = skinFor(store.skin);
+  const pawn = pawnSkin(store.pawn, 0);
+  const look = `${PAWN_BY_ID[store.pawn]?.name || 'По стороне'}, ${WALL_BY_ID[store.wall]?.name || 'По стороне'}`;
 
   const body = h('div', { class: 'stack stack--lg' },
     h('div', { class: 'hstack', style: { gap: '14px' } },
-      h('div', { class: 'profile-skin' }, skinPreview(skin, 92)),
+      h('div', { class: 'profile-skin' }, pawnPreview(pawn)),
       h('div', { class: 'row__main stack stack--sm' },
         h('div', { class: 'field' },
           h('label', { class: 'field__label' }, 'Имя в игре'),
           nameInput),
         h('a', { class: 'btn btn--sm btn--ghost', href: '#/shop' },
-          icon('crown', 14), `Скин: ${skin.name}`))),
+          icon('crown', 14), look))),
     h('div', { class: 'stack stack--sm' },
       h('label', { class: 'switch' }, soundSw, h('span', { class: 'switch__track' }),
         h('span', { class: 'switch__label' }, 'Звуки')),
@@ -176,7 +167,7 @@ async function openProfile() {
 }
 
 function sendProfile() {
-  net.send({ type: 'profile', name: store.name, skin: store.skin });
+  net.send({ type: 'profile', name: store.name, pawn: store.pawn, wall: store.wall });
 }
 
 /* ---------------- роутер ---------------- */
@@ -238,12 +229,6 @@ net.on('hello:ok', () => {
 net.on('status', paintStatus);
 net.on('error', (m) => toast(m.message || 'Ошибка', 'err'));
 net.on('room:error', (m) => toast(m.message || 'Ошибка комнаты', 'err'));
-net.on('lobby:rooms', (m) => {
-  const el = document.getElementById('server-stats');
-  if (el) el.textContent = `онлайн: ${m.online}, комнат: ${m.rooms.length}`;
-});
-
-window.addEventListener('coridor:coins', paintCoins);
 window.addEventListener('coridor:skin', () => sendProfile());
 window.addEventListener('hashchange', route);
 

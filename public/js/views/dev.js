@@ -1,12 +1,33 @@
-/* Раздел «Разработка»: сборка, список релизов, отчёт об ошибке. */
+/* Раздел «Разработка»: сборка и список релизов. */
 
-import { h, clear, icon, modal, copyText, toast } from '../ui.js';
+import { h, clear } from '../ui.js';
 
-export const BUILD = 'Beta 0.3';
-const REPO = 'https://github.com/Berlyk/coridor';
+export const BUILD = 'Beta 0.4';
 const PER_PAGE = 2;
 
 const RELEASES = [
+  {
+    version: 'Beta 0.4',
+    date: '29.08.2026',
+    title: 'Полноценный магазин и чистка интерфейса',
+    items: [
+      'Магазин разделён на три витрины: фишки, стены и готовые комплекты со скидкой.',
+      'Добавлены фильтры по владению и доступности, а также сортировка по цене и имени.',
+      'Ассортимент вырос до 13 фишек, 10 стен и 6 комплектов.',
+      'Карточки товаров выровнены: кнопка покупки всегда на одной высоте.',
+      'Изначально открыт один набор «По стороне»: снизу красные, сверху белые, по бокам синие и жёлтые.',
+      'Значок валюты перерисован в кирпичную кладку, чтобы читался как стена.',
+      'Баланс убран из шапки: он виден в магазине, а начисление показывается в конце партии с анимацией.',
+      'Главная переработана: вместо трёх широких кнопок пара компактных и список режимов со схемами.',
+      'Окно управления партией собрано заново: у каждого режима схема доски, понятное название и состав.',
+      'Режимы переименованы: «Один на один», «Трое, каждый за себя», «Четверо, каждый за себя», «Команды, два на два», «Двое против одного».',
+      'В шапке комнаты остались кнопка старта и компактная панель из трёх иконок, код убран.',
+      'Чат зафиксирован по высоте и растянут вровень с доской.',
+      'Подпись «вы» в списке игроков заменена подсветкой карточки.',
+      'Из раздела «Разработка» убрана отправка бага, номер сборки увеличен.',
+      'Из футера убраны счётчики онлайна и комнат.',
+    ],
+  },
   {
     version: 'Beta 0.3',
     date: '29.08.2026',
@@ -65,10 +86,9 @@ export function renderDev(mount) {
   mount.append(h('div', { class: 'wrap wrap--narrow stack stack--lg' },
     h('div', { class: 'card card--pad build-card' },
       h('div', { class: 'build-badge' },
-        h('div', { class: 'eyebrow' }, 'build'),
-        h('div', { class: 'build-badge__value' }, BUILD)),
-      h('button', { class: 'btn btn--ghost', onClick: reportBug },
-        icon('info', 16), 'Сообщить о баге')),
+        h('div', { class: 'eyebrow' }, 'сборка'),
+        h('div', { class: 'build-badge__value' }, BUILD),
+        h('div', { class: 'build-badge__hint' }, 'текущая версия игры'))),
     list,
     pager));
 
@@ -99,37 +119,6 @@ export function renderDev(mount) {
         class: 'btn btn--sm btn--ghost', disabled: page >= pages - 1,
         onClick: () => { page = Math.min(pages - 1, page + 1); paint(); },
       }, 'След. >'));
-  }
-
-  async function reportBug() {
-    const info = [
-      `Сборка: ${BUILD}`,
-      `Экран: ${window.innerWidth}x${window.innerHeight}`,
-      `Браузер: ${navigator.userAgent}`,
-    ].join('\n');
-
-    await modal({
-      title: 'Сообщить о баге',
-      sub: 'Опишите, что пошло не так, и приложите эти данные',
-      body: h('div', { class: 'stack stack--lg' },
-        h('p', { class: 'dim' },
-          'Ошибки принимаются в issues репозитория. Опишите, что вы делали, '
-          + 'что ожидали увидеть и что произошло на самом деле.'),
-        h('pre', { class: 'code-block' }, info),
-        h('div', { class: 'hstack hstack--wrap' },
-          h('button', {
-            class: 'btn btn--ghost btn--sm',
-            onClick: async () => {
-              if (await copyText(info)) toast('Данные скопированы', 'ok');
-            },
-          }, icon('copy', 14), 'Скопировать данные'),
-          h('a', {
-            class: 'btn btn--primary btn--sm',
-            href: `${REPO}/issues/new`,
-            target: '_blank', rel: 'noopener noreferrer',
-          }, icon('share', 14), 'Открыть issues'))),
-      actions: [{ label: 'Закрыть', class: 'btn--ghost', value: true }],
-    });
   }
 
   return { destroy() {} };
