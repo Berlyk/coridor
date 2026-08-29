@@ -1,10 +1,13 @@
 /**
  * Лобби и матчи «Коридора».
- * Всё состояние — в памяти процесса; сервер является единственным
- * источником правды по правилам (клиент дублирует их только для отзывчивости).
+ * Всё состояние в памяти процесса; сервер это единственный источник правды
+ * по правилам (клиент дублирует их только ради отзывчивости).
  */
 
-import { createGame, applyMove, serialize } from '../shared/quoridor.js';
+import {
+  createGame, applyMove, serialize, getMode, seatCount, MODES,
+  retirePlayer, distanceToGoal,
+} from '../shared/quoridor.js';
 import { advanceMove } from '../shared/ai.js';
 
 const CODE_ALPHABET = 'ACDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -13,8 +16,7 @@ const LOBBY_IDLE_MS = 90_000;
 const ROOM_TTL_MS = 30 * 60_000;
 const MAX_CHAT = 60;
 const MAX_ROOMS = 400;
-
-export const SEAT_COLORS = ['#dc2626', '#e4e4e7'];
+const TURN_TIMES = [0, 5, 10, 15, 30, 60, 120];
 
 /* ------------------------------------------------------------------ */
 
@@ -38,7 +40,50 @@ function sanitizeText(raw, max = 240) {
   return String(raw ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max);
 }
 
+function sanitizeSkin(raw) {
+  const s = String(raw ?? '').slice(0, 24);
+  return /^[a-z0-9_-]{2,24}$/.test(s) ? s : null;
+}
+
 function now() { return Date.now(); }
+
+function clampInt(v, min, max, dflt) {
+  const n = Number.parseInt(v, 10);
+  if (Number.isNaN(n)) return dflt;
+  return Math.min(max, Math.max(min, n));
+}
+
+function intIn(v, min, max) {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < min || n > max) return null;
+  return n;
+}
+
+function normalizeMove(mv) {
+  if (!mv || typeof mv !== 'object') return null;
+  if (mv.type === 'move') {
+    const r = intIn(mv.r, 0, 8), c = intIn(mv.c, 0, 8);
+    if (r === null || c === null) return null;
+    return { type: 'move', r, c };
+  }
+  if (mv.type === 'wall') {
+    const r = intIn(mv.r, 0, 7), c = intIn(mv.c, 0, 7), o = intIn(mv.o, 1, 2);
+    if (r === null || c === null || o === null) return null;
+    return { type: 'wall', r, c, o };
+  }
+  return null;
+}
+
+function reasonText(reason) {
+  switch (reason) {
+    case 'goal': return 'фишка дошла до цели';
+    case 'resign': return 'соперник сдался';
+    case 'timeout': return 'просрочка времени';
+    case 'disconnect': return 'соперник отключился';
+    case 'alone': return 'остальные вышли';
+    default: return String(reason || '');
+  }
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -48,8 +93,6 @@ export class Hub {
     this.clients = new Map();
     /** @type {Map<string, any>} code -> room */
     this.rooms = new Map();
-    /** @type {string[]} очередь быстрого подбора */
-    this.queue = [];
     this.sweepTimer = setInterval(() => this.sweep(), 15_000);
     this.sweepTimer.unref?.();
   }
@@ -82,10 +125,7 @@ export class Hub {
 
   detach(client) {
     client.alive = false;
-    // сессию перехватила новая вкладка — старое соединение просто гасим,
-    // ни место в комнате, ни очередь трогать нельзя
     if (client.replacedBy) return;
-    this.dequeue(client.id);
     if (client.id && this.clients.get(client.id) === client) {
       this.clients.delete(client.id);
     }
@@ -131,17 +171,14 @@ export class Hub {
       case 'room:create': return this.onCreate(client, msg);
       case 'room:join': return this.onJoin(client, msg);
       case 'room:leave': return this.onLeave(client);
-      case 'room:sit': return this.onSit(client, msg);
-      case 'room:ready': return this.onReady(client, msg);
       case 'room:start': return this.onStart(client);
       case 'room:kick': return this.onKick(client, msg);
       case 'room:settings': return this.onSettings(client, msg);
+      case 'room:resync': return this.onResync(client);
       case 'game:move': return this.onMove(client, msg);
       case 'game:resign': return this.onResign(client);
       case 'game:rematch': return this.onRematch(client);
       case 'chat:send': return this.onChat(client, msg);
-      case 'queue:join': return this.onQueueJoin(client);
-      case 'queue:leave': return this.onQueueLeave(client);
       default: return;
     }
   }
@@ -150,7 +187,6 @@ export class Hub {
     const wanted = typeof msg.clientId === 'string' && /^[A-Za-z0-9_-]{6,40}$/.test(msg.clientId)
       ? msg.clientId : null;
 
-    // если тот же id уже висит на другом сокете — старый выкидываем
     if (wanted && this.clients.has(wanted)) {
       const old = this.clients.get(wanted);
       if (old !== client) {
@@ -162,9 +198,9 @@ export class Hub {
 
     client.id = wanted || ('c' + Math.random().toString(36).slice(2, 12));
     client.name = sanitizeName(msg.name);
+    client.skin = sanitizeSkin(msg.skin);
     this.clients.set(client.id, client);
 
-    // восстановление в комнате
     let restored = null;
     for (const room of this.rooms.values()) {
       const m = room.members.get(client.id);
@@ -172,6 +208,7 @@ export class Hub {
       m.connected = true;
       m.disconnectAt = null;
       m.name = client.name;
+      m.skin = client.skin;
       client.room = room;
       restored = room;
       break;
@@ -182,9 +219,12 @@ export class Hub {
       clientId: client.id,
       name: client.name,
       serverTime: now(),
+      modes: Object.fromEntries(Object.entries(MODES).map(([k, m]) => [k, {
+        id: m.id, label: m.label, short: m.short, hint: m.hint,
+        seats: m.seats, teams: m.teams, teamNames: m.teamNames,
+      }])),
     });
     if (restored) {
-      // сперва отдаём состояние вернувшемуся, только потом сообщаем остальным
       this.pushRoom(restored, client);
       this.send(client, {
         type: 'game:clock',
@@ -199,10 +239,11 @@ export class Hub {
 
   onProfile(client, msg) {
     client.name = sanitizeName(msg.name, client.name);
+    if (msg.skin !== undefined) client.skin = sanitizeSkin(msg.skin);
     const room = client.room;
     if (room) {
       const m = room.members.get(client.id);
-      if (m) { m.name = client.name; this.pushRoom(room); }
+      if (m) { m.name = client.name; m.skin = client.skin; this.pushRoom(room); }
       this.broadcastLobby();
     }
     this.send(client, { type: 'profile:ok', name: client.name });
@@ -211,6 +252,12 @@ export class Hub {
   onLobbySubscribe(client, msg) {
     client.watchingLobby = msg.on !== false;
     if (client.watchingLobby) this.sendLobby(client);
+  }
+
+  onResync(client) {
+    const room = client.room;
+    if (room) this.pushRoom(room, client);
+    else this.sendLobby(client);
   }
 
   /* ---------------- лобби ---------------- */
@@ -223,39 +270,38 @@ export class Hub {
       list.push({
         code: room.code,
         name: room.name,
-        host: room.members.get(room.hostId)?.name || '—',
+        host: room.members.get(room.hostId)?.name || 'нет хоста',
         players: seated,
+        capacity: room.seats.length,
         spectators: [...room.members.values()].filter((m) => m.seat === null).length,
         status: room.status,
         isPrivate: room.isPrivate,
+        mode: room.settings.mode,
         wallsPerPlayer: room.settings.wallsPerPlayer,
         turnTimeSec: room.settings.turnTimeSec,
         createdAt: room.createdAt,
       });
     }
     list.sort((a, b) => {
-      const rank = (r) => (r.status === 'lobby' && r.players < 2 ? 0 : r.status === 'lobby' ? 1 : 2);
+      const rank = (r) => (r.status === 'lobby' && r.players < r.capacity ? 0
+        : r.status === 'lobby' ? 1 : 2);
       return rank(a) - rank(b) || b.createdAt - a.createdAt;
     });
     return list;
   }
 
-  sendLobby(client) {
-    this.send(client, {
+  lobbyPayload() {
+    return {
       type: 'lobby:rooms',
       rooms: this.publicRooms(),
       online: this.clients.size,
-      queue: this.queue.length,
-    });
+    };
   }
 
+  sendLobby(client) { this.send(client, this.lobbyPayload()); }
+
   broadcastLobby() {
-    const payload = {
-      type: 'lobby:rooms',
-      rooms: this.publicRooms(),
-      online: this.clients.size,
-      queue: this.queue.length,
-    };
+    const payload = this.lobbyPayload();
     for (const c of this.clients.values()) {
       if (c.watchingLobby) this.send(c, payload);
     }
@@ -263,8 +309,22 @@ export class Hub {
 
   /* ---------------- комнаты ---------------- */
 
+  normalizeSettings(raw = {}, prev = null) {
+    const modeId = MODES[raw.mode] ? raw.mode : (prev?.mode || 'duel');
+    const mode = getMode(modeId);
+    const baseWalls = mode.walls[0];
+    const wallsPerPlayer = raw.wallsPerPlayer === undefined
+      ? (prev && prev.mode === modeId ? prev.wallsPerPlayer : baseWalls)
+      : clampInt(raw.wallsPerPlayer, 3, 20, baseWalls);
+    const turnTimeSec = TURN_TIMES.includes(raw.turnTimeSec)
+      ? raw.turnTimeSec
+      : (prev ? prev.turnTimeSec : 60);
+    return { mode: modeId, wallsPerPlayer, turnTimeSec };
+  }
+
   makeRoom(client, opts = {}) {
     const code = makeCode(this.rooms);
+    const settings = this.normalizeSettings(opts);
     const room = {
       code,
       name: sanitizeName(opts.name, `Партия ${client.name}`).slice(0, 28),
@@ -272,11 +332,8 @@ export class Hub {
       isPrivate: !!opts.isPrivate,
       password: opts.isPrivate ? sanitizeText(opts.password, 24) : '',
       hidden: !!opts.hidden,
-      settings: {
-        wallsPerPlayer: clampInt(opts.wallsPerPlayer, 3, 12, 10),
-        turnTimeSec: [0, 15, 30, 60, 120].includes(opts.turnTimeSec) ? opts.turnTimeSec : 0,
-      },
-      seats: [null, null],
+      settings,
+      seats: new Array(seatCount(settings.mode)).fill(null),
       members: new Map(),
       status: 'lobby',
       game: null,
@@ -284,7 +341,8 @@ export class Hub {
       rematch: new Set(),
       turnDeadline: 0,
       turnTimer: null,
-      score: [0, 0],
+      score: [],
+      seq: 0,
       createdAt: now(),
       lastActivity: now(),
     };
@@ -292,12 +350,18 @@ export class Hub {
     return room;
   }
 
+  /** Свободное место или null. */
+  freeSeat(room) {
+    const i = room.seats.indexOf(null);
+    return i === -1 ? null : i;
+  }
+
   addMember(room, client, seat) {
     const m = {
       id: client.id,
       name: client.name,
+      skin: client.skin || null,
       seat,
-      ready: false,
       connected: true,
       disconnectAt: null,
       joinedAt: now(),
@@ -365,9 +429,9 @@ export class Hub {
       return this.pushRoom(room);
     }
     this.leaveCurrent(client);
-    const freeSeat = room.status === 'lobby' ? room.seats.indexOf(null) : -1;
-    this.addMember(room, client, freeSeat === -1 ? null : freeSeat);
-    this.sysChat(room, freeSeat === -1
+    const seat = room.status === 'lobby' ? this.freeSeat(room) : null;
+    this.addMember(room, client, seat);
+    this.sysChat(room, seat === null
       ? `${client.name} наблюдает за партией`
       : `${client.name} присоединился`);
     this.pushRoom(room);
@@ -377,9 +441,9 @@ export class Hub {
   leaveCurrent(client) {
     const room = client.room;
     if (!room) return;
-    if (room.status === 'playing') {
+    if (room.status === 'playing' && room.game) {
       const m = room.members.get(client.id);
-      if (m && m.seat !== null) this.finish(room, 1 - m.seat, 'resign');
+      if (m && m.seat !== null) this.retire(room, m.seat, 'resign');
     }
     this.removeMember(room, client.id, 'leave');
     client.room = null;
@@ -391,44 +455,40 @@ export class Hub {
     this.broadcastLobby();
   }
 
-  onSit(client, msg) {
-    const room = client.room;
-    if (!room || room.status !== 'lobby') return;
-    const m = room.members.get(client.id);
-    if (!m) return;
-    const seat = msg.seat === null ? null : clampInt(msg.seat, 0, 1, 0);
-    if (seat !== null && room.seats[seat] && room.seats[seat] !== client.id) {
-      return this.send(client, { type: 'room:error', message: 'Место занято' });
-    }
-    if (m.seat !== null) room.seats[m.seat] = null;
-    m.seat = seat;
-    m.ready = false;
-    if (seat !== null) room.seats[seat] = client.id;
-    this.pushRoom(room);
-    this.broadcastLobby();
-  }
-
-  onReady(client, msg) {
-    const room = client.room;
-    if (!room || room.status !== 'lobby') return;
-    const m = room.members.get(client.id);
-    if (!m || m.seat === null) return;
-    m.ready = msg.ready !== false;
-    this.pushRoom(room);
-    this.maybeAutoStart(room);
-  }
-
   onSettings(client, msg) {
     const room = client.room;
-    if (!room || room.hostId !== client.id || room.status !== 'lobby') return;
-    if (msg.wallsPerPlayer !== undefined) {
-      room.settings.wallsPerPlayer = clampInt(msg.wallsPerPlayer, 3, 12, 10);
-    }
-    if (msg.turnTimeSec !== undefined && [0, 15, 30, 60, 120].includes(msg.turnTimeSec)) {
-      room.settings.turnTimeSec = msg.turnTimeSec;
-    }
+    if (!room || room.hostId !== client.id || room.status === 'playing') return;
+    const prev = room.settings;
+    room.settings = this.normalizeSettings(msg, prev);
     if (msg.name !== undefined) room.name = sanitizeName(msg.name, room.name).slice(0, 28);
-    for (const m of room.members.values()) m.ready = false;
+    if (msg.isPrivate !== undefined) {
+      room.isPrivate = !!msg.isPrivate;
+      room.password = room.isPrivate ? sanitizeText(msg.password ?? room.password, 24) : '';
+    }
+
+    // смена режима меняет число мест: пересобираем рассадку
+    const need = seatCount(room.settings.mode);
+    if (need !== room.seats.length) {
+      const sitting = room.seats.filter(Boolean);
+      room.seats = new Array(need).fill(null);
+      for (const m of room.members.values()) m.seat = null;
+      for (const id of sitting) {
+        const free = this.freeSeat(room);
+        if (free === null) break;
+        room.seats[free] = id;
+        const m = room.members.get(id);
+        if (m) m.seat = free;
+      }
+      // добавляем наблюдателей на освободившиеся места
+      for (const m of room.members.values()) {
+        if (m.seat !== null) continue;
+        const free = this.freeSeat(room);
+        if (free === null) break;
+        room.seats[free] = m.id;
+        m.seat = free;
+      }
+    }
+    if (room.status === 'finished') { room.status = 'lobby'; room.game = null; }
     this.pushRoom(room);
     this.broadcastLobby();
   }
@@ -446,28 +506,24 @@ export class Hub {
     this.broadcastLobby();
   }
 
-  maybeAutoStart(room) {
-    if (room.status !== 'lobby') return;
-    const seated = room.seats.map((id) => (id ? room.members.get(id) : null));
-    if (!seated[0] || !seated[1]) return;
-    if (!seated[0].ready || !seated[1].ready) return;
-    this.startGame(room);
-  }
-
   onStart(client) {
     const room = client.room;
-    if (!room || room.hostId !== client.id || room.status !== 'lobby') return;
-    if (!room.seats[0] || !room.seats[1]) {
-      return this.send(client, { type: 'room:error', message: 'Нужны два игрока' });
+    if (!room || room.hostId !== client.id) return;
+    if (room.status === 'playing') return;
+    if (room.seats.some((s) => !s)) {
+      return this.send(client, { type: 'room:error', message: 'Не все места заняты' });
     }
     this.startGame(room);
   }
 
   startGame(room) {
     room.status = 'playing';
-    room.game = createGame({ wallsPerPlayer: room.settings.wallsPerPlayer });
+    room.game = createGame({
+      mode: room.settings.mode,
+      wallsPerPlayer: room.settings.wallsPerPlayer,
+    });
     room.rematch.clear();
-    for (const m of room.members.values()) m.ready = false;
+    if (room.score.length !== room.seats.length) room.score = new Array(room.seats.length).fill(0);
     this.sysChat(room, 'Партия началась');
     this.armTurnTimer(room);
     this.pushRoom(room, null, { started: true });
@@ -490,9 +546,9 @@ export class Hub {
     if (room.status !== 'playing' || !room.game) return;
     const p = room.game.turn;
     const mv = advanceMove(room.game, p);
-    if (!mv) return this.finish(room, 1 - p, 'timeout');
+    if (!mv) return this.retire(room, p, 'timeout');
     const res = applyMove(room.game, p, mv);
-    if (!res.ok) return this.finish(room, 1 - p, 'timeout');
+    if (!res.ok) return this.retire(room, p, 'timeout');
     this.afterMove(room, p, mv, res, true);
   }
 
@@ -502,7 +558,10 @@ export class Hub {
     const m = room.members.get(client.id);
     if (!m || m.seat === null) return;
     if (room.game.turn !== m.seat) {
-      return this.send(client, { type: 'game:reject', message: 'Сейчас не ваш ход', state: serialize(room.game) });
+      return this.send(client, {
+        type: 'game:reject', message: 'Сейчас не ваш ход',
+        state: serialize(room.game), seq: room.seq,
+      });
     }
     const mv = normalizeMove(msg.move);
     if (!mv) return this.send(client, { type: 'game:reject', message: 'Некорректный ход' });
@@ -514,6 +573,7 @@ export class Hub {
         message: res.message,
         code: res.code,
         state: serialize(room.game),
+        seq: room.seq,
       });
     }
     this.afterMove(room, m.seat, mv, res, false);
@@ -522,6 +582,7 @@ export class Hub {
   afterMove(room, seat, mv, res, auto) {
     room.lastActivity = now();
     const g = room.game;
+    room.seq++;
     this.broadcast(room, {
       type: 'game:move',
       by: seat,
@@ -529,12 +590,9 @@ export class Hub {
       notation: res.notation,
       auto: !!auto,
       state: serialize(g),
-      turnDeadline: 0,
+      seq: room.seq,
     });
-    if (g.winner !== null) {
-      this.finish(room, g.winner, g.reason || 'goal');
-      return;
-    }
+    if (g.winner !== null) return this.finish(room, g.winner, g.reason || 'goal');
     this.armTurnTimer(room);
     this.broadcast(room, { type: 'game:clock', turnDeadline: room.turnDeadline, turn: g.turn });
   }
@@ -544,29 +602,69 @@ export class Hub {
     if (!room || room.status !== 'playing') return;
     const m = room.members.get(client.id);
     if (!m || m.seat === null) return;
-    this.finish(room, 1 - m.seat, 'resign');
+    this.retire(room, m.seat, 'resign');
   }
 
-  finish(room, winnerSeat, reason) {
+  /** Вывести игрока из партии и, если победитель определился, закрыть её. */
+  retire(room, seatIdx, reason) {
+    if (!room.game || room.status !== 'playing') return;
+    retirePlayer(room.game, seatIdx, reason);
+    room.seq++;
+    this.broadcast(room, {
+      type: 'game:move',
+      by: seatIdx,
+      move: null,
+      retired: true,
+      reason,
+      state: serialize(room.game),
+      seq: room.seq,
+    });
+    if (room.game.winner !== null) {
+      this.finish(room, room.game.winner, room.game.reason || reason);
+      return;
+    }
+    this.armTurnTimer(room);
+    this.broadcast(room, {
+      type: 'game:clock', turnDeadline: room.turnDeadline, turn: room.game.turn,
+    });
+  }
+
+  finish(room, winnerTeam, reason) {
     if (room.status === 'finished') return;
     if (room.turnTimer) { clearTimeout(room.turnTimer); room.turnTimer = null; }
     room.status = 'finished';
     room.turnDeadline = 0;
-    if (room.game) {
-      room.game.winner = winnerSeat;
-      room.game.reason = reason;
+    const g = room.game;
+    if (g) { g.winner = winnerTeam; g.reason = reason; }
+
+    const mode = getMode(room.settings.mode);
+    const winners = [];
+    if (g && winnerTeam !== null) {
+      g.players.forEach((p, i) => {
+        if (p.team !== winnerTeam) return;
+        winners.push(i);
+        if (room.score[i] !== undefined) room.score[i]++;
+      });
     }
-    if (winnerSeat === 0 || winnerSeat === 1) room.score[winnerSeat]++;
-    const winner = room.seats[winnerSeat] ? room.members.get(room.seats[winnerSeat]) : null;
+    const winnerNames = winners
+      .map((i) => room.members.get(room.seats[i])?.name)
+      .filter(Boolean);
+
+    room.seq++;
     this.broadcast(room, {
       type: 'game:over',
-      winner: winnerSeat,
-      winnerName: winner?.name || '—',
+      winnerTeam,
+      winners,
+      winnerNames,
+      teamName: winnerTeam !== null ? (mode.teamNames[winnerTeam] || '') : '',
       reason,
       score: room.score,
-      state: room.game ? serialize(room.game) : null,
+      state: g ? serialize(g) : null,
+      seq: room.seq,
     });
-    this.sysChat(room, `Победа: ${winner?.name || '—'} (${reasonText(reason)})`);
+    this.sysChat(room, winnerNames.length
+      ? `Победа: ${winnerNames.join(' и ')} (${reasonText(reason)})`
+      : `Партия окончена (${reasonText(reason)})`);
     this.pushRoom(room);
     this.broadcastLobby();
   }
@@ -577,21 +675,21 @@ export class Hub {
     const m = room.members.get(client.id);
     if (!m || m.seat === null) return;
     room.rematch.add(client.id);
-    const both = room.seats.every((id) => id && room.rematch.has(id));
-    this.broadcast(room, {
-      type: 'room:rematch',
-      players: [...room.rematch],
+    this.broadcast(room, { type: 'room:rematch', players: [...room.rematch] });
+    const all = room.seats.every((id) => id && room.rematch.has(id));
+    if (!all) return;
+
+    // сдвигаем всех на одно место, чтобы стороны менялись
+    const ids = room.seats.slice();
+    const shifted = ids.slice(1).concat(ids.slice(0, 1));
+    room.seats = shifted;
+    shifted.forEach((id, i) => {
+      const mm = room.members.get(id);
+      if (mm) mm.seat = i;
     });
-    if (both) {
-      // меняем стороны местами — честнее
-      room.seats.reverse();
-      for (const [i, id] of room.seats.entries()) {
-        if (id && room.members.has(id)) room.members.get(id).seat = i;
-      }
-      room.score.reverse();
-      room.status = 'lobby';
-      this.startGame(room);
-    }
+    room.score = room.score.slice(1).concat(room.score.slice(0, 1));
+    room.status = 'lobby';
+    this.startGame(room);
   }
 
   /* ---------------- чат ---------------- */
@@ -622,59 +720,12 @@ export class Hub {
     this.broadcast(room, { type: 'chat:msg', message: entry });
   }
 
-  /* ---------------- быстрый подбор ---------------- */
-
-  onQueueJoin(client) {
-    if (!client.id) return;
-    this.leaveCurrent(client);
-    if (!this.queue.includes(client.id)) this.queue.push(client.id);
-    this.pumpQueue();
-    if (this.queue.includes(client.id)) {
-      this.send(client, { type: 'queue:status', inQueue: true, size: this.queue.length });
-    }
-    this.broadcastLobby();
-  }
-
-  onQueueLeave(client) {
-    this.dequeue(client.id);
-    this.send(client, { type: 'queue:status', inQueue: false, size: this.queue.length });
-    this.broadcastLobby();
-  }
-
-  dequeue(clientId) {
-    const i = this.queue.indexOf(clientId);
-    if (i !== -1) this.queue.splice(i, 1);
-  }
-
-  pumpQueue() {
-    while (this.queue.length >= 2) {
-      const aId = this.queue.shift();
-      const bId = this.queue.shift();
-      const a = this.clients.get(aId);
-      const b = this.clients.get(bId);
-      if (!a?.alive) { if (b?.alive) this.queue.unshift(bId); continue; }
-      if (!b?.alive) { this.queue.unshift(aId); continue; }
-
-      const room = this.makeRoom(a, {
-        name: `${a.name} и ${b.name}`,
-        hidden: true,
-        wallsPerPlayer: 10,
-        turnTimeSec: 60,
-      });
-      this.addMember(room, a, 0);
-      this.addMember(room, b, 1);
-      this.send(a, { type: 'queue:status', inQueue: false, size: this.queue.length });
-      this.send(b, { type: 'queue:status', inQueue: false, size: this.queue.length });
-      this.sysChat(room, 'Соперник найден. Удачи!');
-      this.startGame(room);
-    }
-  }
-
   /* ---------------- рассылка ---------------- */
 
   roomPayload(room, extra = {}) {
     return {
       type: 'room:state',
+      seq: room.seq,
       room: {
         code: room.code,
         name: room.name,
@@ -684,9 +735,10 @@ export class Hub {
         settings: room.settings,
         status: room.status,
         seats: room.seats,
+        capacity: room.seats.length,
         score: room.score,
         members: [...room.members.values()].map((m) => ({
-          id: m.id, name: m.name, seat: m.seat, ready: m.ready,
+          id: m.id, name: m.name, skin: m.skin, seat: m.seat,
           connected: m.connected, disconnectAt: m.disconnectAt,
         })),
         rematch: [...room.rematch],
@@ -724,7 +776,7 @@ export class Hub {
         const gone = t - m.disconnectAt;
         if (room.status === 'playing' && m.seat !== null) {
           if (gone > RECONNECT_GRACE_MS) {
-            this.finish(room, 1 - m.seat, 'disconnect');
+            this.retire(room, m.seat, 'disconnect');
             this.removeMember(room, m.id, 'disconnect');
           }
         } else if (gone > LOBBY_IDLE_MS) {
@@ -736,7 +788,6 @@ export class Hub {
       if (!anyConnected && t - room.lastActivity > LOBBY_IDLE_MS) this.destroyRoom(room);
       else if (t - room.lastActivity > ROOM_TTL_MS && room.status !== 'playing') this.destroyRoom(room);
     }
-    this.queue = this.queue.filter((id) => this.clients.get(id)?.alive);
   }
 
   stats() {
@@ -746,47 +797,8 @@ export class Hub {
       online: this.clients.size,
       rooms: this.rooms.size,
       playing,
-      queue: this.queue.length,
     };
   }
 }
 
-/* ------------------------------------------------------------------ */
-
-function clampInt(v, min, max, dflt) {
-  const n = Number.parseInt(v, 10);
-  if (Number.isNaN(n)) return dflt;
-  return Math.min(max, Math.max(min, n));
-}
-
-/** Целое строго в диапазоне [min,max], иначе null. */
-function intIn(v, min, max) {
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < min || n > max) return null;
-  return n;
-}
-
-function normalizeMove(mv) {
-  if (!mv || typeof mv !== 'object') return null;
-  if (mv.type === 'move') {
-    const r = intIn(mv.r, 0, 8), c = intIn(mv.c, 0, 8);
-    if (r === null || c === null) return null;
-    return { type: 'move', r, c };
-  }
-  if (mv.type === 'wall') {
-    const r = intIn(mv.r, 0, 7), c = intIn(mv.c, 0, 7), o = intIn(mv.o, 1, 2);
-    if (r === null || c === null || o === null) return null;
-    return { type: 'wall', r, c, o };
-  }
-  return null;
-}
-
-function reasonText(reason) {
-  switch (reason) {
-    case 'goal': return 'дошёл до цели';
-    case 'resign': return 'сдача соперника';
-    case 'timeout': return 'просрочка времени';
-    case 'disconnect': return 'соперник отключился';
-    default: return reason;
-  }
-}
+export { distanceToGoal };

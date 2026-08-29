@@ -1,36 +1,43 @@
-/* Отрисовка доски, ввод и вся анимация. */
+/* Отрисовка доски, ввод и вся анимация. Доска умеет 2, 3 и 4 фишки. */
 
 import {
   N, W, H, V,
-  pawnMoves, checkWall, shortestPath, cellName,
+  pawnMoves, checkWall, shortestPath, cellName, SEATS,
 } from '/shared/quoridor.js';
 import { h, clear } from './ui.js';
 import { store } from './store.js';
 import { sfx } from './sound.js';
+import { skinFor, seatSkin, paintSkin } from './skins.js';
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+/** Насколько повернуть доску, чтобы моё место оказалось снизу. */
+const SEAT_ROT = { 0: 0, 1: 2, 2: 3, 3: 1 };
 
 export class Board {
   /**
    * @param {object} opts
-   *   onMove(move)      — пользователь сделал ход
-   *   onIllegal(reason) — попытка недопустимого хода
+   *   onMove(move)      пользователь сделал ход
+   *   onIllegal(reason) попытка недопустимого хода
+   *   onOrient(o)       сменился угол стены
    */
   constructor(opts = {}) {
     this.opts = opts;
     this.game = null;
-    this.mySeat = 0;
-    this.flip = false;          // визуальный переворот доски
+    this.me = 0;              // индекс моего игрока в game.players
+    this.rot = 0;             // поворот доски (0..3, по 90 градусов)
     this.interactive = false;
     this.legal = [];
-    this.wallEls = new Map();   // key -> element
-    this.hover = null;          // {kind:'cell'|'wall', ...}
-    this.armed = null;          // подтверждение касанием
+    this.wallEls = new Map();
+    this.pawnEls = [];
+    this.hover = null;
+    this.armed = null;
     this.prefOrient = H;
     this.cell = 0;
     this.gap = 0;
     this.lastMove = null;
-    this._raf = 0;
+    this.skins = [];
+    this.chosenSkins = [];
 
     this.root = h('div', { class: 'board-frame' });
     this.board = h('div', { class: 'board' });
@@ -49,7 +56,6 @@ export class Board {
     for (const el of Object.values(this.layers)) this.board.append(el);
 
     this._buildCells();
-    this._buildPawns();
     this._bindInput();
 
     this._onResize = () => this._measure();
@@ -66,7 +72,6 @@ export class Board {
     return this;
   }
 
-  /** Пересчитать геометрию; повторяет попытки, пока доска не получит размер. */
   refit(tries = 24) {
     this._measure();
     if (this.cell > 0 || tries <= 0) return;
@@ -89,7 +94,7 @@ export class Board {
   _measure() {
     const size = this.board.clientWidth;
     if (!size) return;
-    const gap = clamp(Math.round(size * 0.023), 6, 15);
+    const gap = clamp(Math.round(size * 0.023), 5, 15);
     const cell = (size - (N - 1) * gap) / N;
     if (Math.abs(cell - this.cell) < 0.01 && gap === this.gap) return;
     this.cell = cell;
@@ -99,16 +104,49 @@ export class Board {
     if (this.game) this._syncPath();
   }
 
-  /** экранные (r,c) с учётом переворота */
-  _view(r, c) {
-    return this.flip ? { r: N - 1 - r, c: N - 1 - c } : { r, c };
+  /** Клетка доски в экранные координаты. */
+  _viewCell(r, c) {
+    switch (this.rot) {
+      case 1: return { r: c, c: N - 1 - r };
+      case 2: return { r: N - 1 - r, c: N - 1 - c };
+      case 3: return { r: N - 1 - c, c: r };
+      default: return { r, c };
+    }
   }
 
-  /** экранные координаты паза стены */
+  /** Экранная клетка в координаты доски. */
+  _invView(vr, vc) {
+    switch (this.rot) {
+      case 1: return { r: N - 1 - vc, c: vr };
+      case 2: return { r: N - 1 - vr, c: N - 1 - vc };
+      case 3: return { r: vc, c: N - 1 - vr };
+      default: return { r: vr, c: vc };
+    }
+  }
+
+  /** Паз стены в экранные координаты; при повороте на 90 меняется ориентация. */
   _viewWall(r, c, o) {
-    if (!this.flip) return { r, c };
-    // стена занимает 2 клетки, поэтому при развороте смещаемся на 1
-    return { r: W - 1 - r, c: W - 1 - c };
+    switch (this.rot) {
+      case 1: return { r: c, c: W - 1 - r, o: o === H ? V : H };
+      case 2: return { r: W - 1 - r, c: W - 1 - c, o };
+      case 3: return { r: W - 1 - c, c: r, o: o === H ? V : H };
+      default: return { r, c, o };
+    }
+  }
+
+  /** Экранная точка в координаты доски. */
+  _boardPoint(x, y, size) {
+    switch (this.rot) {
+      case 1: return { x: y, y: size - x };
+      case 2: return { x: size - x, y: size - y };
+      case 3: return { x: size - y, y: x };
+      default: return { x, y };
+    }
+  }
+
+  /** Ориентация из экранной системы в систему доски. */
+  _boardOrient(o) {
+    return (this.rot % 2) ? (o === H ? V : H) : o;
   }
 
   /* ---------------- статические слои ---------------- */
@@ -123,66 +161,92 @@ export class Board {
         frag.append(el);
       }
     }
-    // координаты по краям
     const coords = h('div', { class: 'b-coords' });
     for (let c = 0; c < N; c++) {
-      coords.append(h('div', {
-        class: 'b-coord b-coord--file',
-        style: { '--c': c },
-      }, 'abcdefghi'[c]));
+      coords.append(h('div', { class: 'b-coord b-coord--file', style: { '--c': c } }, ''));
     }
     for (let r = 0; r < N; r++) {
-      coords.append(h('div', {
-        class: 'b-coord b-coord--rank',
-        style: { '--r': r },
-      }, String(N - r)));
+      coords.append(h('div', { class: 'b-coord b-coord--rank', style: { '--r': r } }, ''));
     }
     this.coords = coords;
     this.layers.cells.append(frag, coords);
-  }
-
-  _buildPawns() {
-    this.pawnEls = [0, 1].map((i) => h('div', {
-      class: `pawn pawn--${i}`,
-      style: { '--r': 0, '--c': 4 },
-    }, h('div', { class: 'pawn__body' })));
-    this.layers.pawns.append(...this.pawnEls);
+    this._paintCoords();
   }
 
   _paintCoords() {
     for (const el of this.coords.children) {
       if (el.classList.contains('b-coord--file')) {
-        const c = Number(el.style.getPropertyValue('--c'));
-        el.textContent = 'abcdefghi'[this.flip ? N - 1 - c : c];
+        const vc = Number(el.style.getPropertyValue('--c'));
+        el.textContent = 'abcdefghi'[this._invView(N - 1, vc).c];
       } else {
-        const r = Number(el.style.getPropertyValue('--r'));
-        el.textContent = String(this.flip ? r + 1 : N - r);
+        const vr = Number(el.style.getPropertyValue('--r'));
+        el.textContent = String(N - this._invView(vr, 0).r);
       }
     }
+  }
+
+  _buildPawns(count) {
+    clear(this.layers.pawns);
+    this.pawnEls = [];
+    for (let i = 0; i < count; i++) {
+      const el = h('div', { class: 'pawn', style: { '--r': 0, '--c': 4 } },
+        h('div', { class: 'pawn__body' }, h('span', { class: 'pawn__fx' })));
+      this.pawnEls.push(el);
+      this.layers.pawns.append(el);
+    }
+  }
+
+  /** Скин игрока: свой выбор, иначе цвет места. Совпадения разводим. */
+  _resolveSkins(game, chosen = []) {
+    const used = new Set();
+    const out = [];
+    for (let i = 0; i < game.players.length; i++) {
+      const seat = game.players[i].seat;
+      let skin = chosen[i] ? skinFor(chosen[i]) : null;
+      if (!skin || used.has(skin.id)) skin = seatSkin(seat);
+      if (used.has(skin.id)) {
+        const alt = [0, 1, 2, 3].map((s) => seatSkin(s)).find((s) => !used.has(s.id));
+        if (alt) skin = alt;
+      }
+      used.add(skin.id);
+      out.push(skin);
+    }
+    return out;
   }
 
   /* ---------------- обновление состояния ---------------- */
 
   /**
-   * @param {object} game    состояние из shared/quoridor.js
-   * @param {object} opts    {mySeat, interactive, silent, lastMove, flip}
+   * @param {object} game  состояние из shared/quoridor.js
+   * @param {object} opts  {me, interactive, silent, lastMove, skins}
    */
   update(game, opts = {}) {
     const prev = this.game;
+    const rebuilt = !prev || prev.players.length !== game.players.length
+      || prev.mode !== game.mode;
     this.game = game;
-    this._measure();          // страховка, если ResizeObserver не сработал
-    if (opts.mySeat !== undefined) this.mySeat = opts.mySeat;
-    if (opts.flip !== undefined && opts.flip !== this.flip) {
-      this.flip = opts.flip;
-      this._paintCoords();
-      this._resyncAllWalls();
+
+    if (opts.me !== undefined && opts.me !== null) {
+      const seat = game.players[opts.me]?.seat ?? 0;
+      const rot = SEAT_ROT[seat] ?? 0;
+      if (rot !== this.rot || this.me !== opts.me) {
+        this.me = opts.me;
+        this.rot = rot;
+        this._paintCoords();
+        this._resyncAllWalls();
+      }
     }
     if (opts.interactive !== undefined) this.interactive = opts.interactive;
     if (opts.lastMove !== undefined) this.lastMove = opts.lastMove;
+    if (opts.skins) this.chosenSkins = opts.skins;
 
+    this.skins = this._resolveSkins(game, this.chosenSkins);
+    if (rebuilt) this._buildPawns(game.players.length);
+
+    this._measure();
     const silent = !!opts.silent || !store.animations;
     this._syncWalls(silent);
-    this._syncPawns(prev, silent);
+    this._syncPawns(prev, silent, rebuilt);
     this._syncCells();
     this._syncMoves();
     this._syncPath();
@@ -193,14 +257,26 @@ export class Board {
 
   _syncCells() {
     const last = this.lastMove;
+    const goals = new Map();
+    for (let i = 0; i < this.game.players.length; i++) {
+      const p = this.game.players[i];
+      const skin = this.skins[i];
+      for (let k = 0; k < N; k++) {
+        const key = p.goal.axis === 'row' ? `${p.goal.value}:${k}` : `${k}:${p.goal.value}`;
+        goals.set(key, skin.mid);
+      }
+    }
+
     for (let r = 0; r < N; r++) {
       for (let c = 0; c < N; c++) {
         const el = this.cellEls[r * N + c];
-        const v = this._view(r, c);
+        const v = this._viewCell(r, c);
         el.style.setProperty('--r', v.r);
         el.style.setProperty('--c', v.c);
-        el.classList.toggle('is-goal-0', r === 0);
-        el.classList.toggle('is-goal-1', r === N - 1);
+        const goal = goals.get(`${r}:${c}`);
+        el.classList.toggle('is-goal', !!goal);
+        if (goal) el.style.setProperty('--goal-color', goal);
+        else el.style.removeProperty('--goal-color');
         el.classList.toggle('is-last', !!(last && last.type === 'move' && last.r === r && last.c === c));
       }
     }
@@ -232,33 +308,43 @@ export class Board {
       const v = this._viewWall(r, c, o);
       el.style.setProperty('--r', v.r);
       el.style.setProperty('--c', v.c);
+      el.classList.toggle('wall--h', v.o === H);
+      el.classList.toggle('wall--v', v.o === V);
     }
   }
 
   _makeWall(w) {
     const v = this._viewWall(w.r, w.c, w.o);
-    return h('div', {
-      class: `wall wall--${w.o === H ? 'h' : 'v'} wall--p${w.by ?? 0}`,
+    const skin = this.skins[w.by] || this.skins[0] || seatSkin(0);
+    const el = h('div', {
+      class: `wall wall--${v.o === H ? 'h' : 'v'} wall--tex-${skin.wall}`,
       style: { '--r': v.r, '--c': v.c },
     },
       h('div', { class: 'wall__glow' }),
       h('div', { class: 'wall__core' }),
       h('div', { class: 'wall__seam' }));
+    return paintSkin(el, skin);
   }
 
-  _syncPawns(prev, silent) {
-    for (let i = 0; i < 2; i++) {
+  _syncPawns(prev, silent, rebuilt) {
+    for (let i = 0; i < this.game.players.length; i++) {
       const p = this.game.players[i];
       const el = this.pawnEls[i];
-      const before = prev?.players?.[i];
-      const v = this._view(p.r, p.c);
+      if (!el) continue;
+      const skin = this.skins[i];
+      const before = rebuilt ? null : prev?.players?.[i];
+      const v = this._viewCell(p.r, p.c);
       const moved = before && (before.r !== p.r || before.c !== p.c);
       const dist = before ? Math.abs(before.r - p.r) + Math.abs(before.c - p.c) : 0;
 
+      el.className = `pawn pawn--style-${skin.style}`;
+      paintSkin(el, skin);
       el.style.setProperty('--r', v.r);
       el.style.setProperty('--c', v.c);
       el.classList.toggle('is-active', this.game.winner === null && this.game.turn === i);
-      el.classList.toggle('is-win', this.game.winner === i);
+      el.classList.toggle('is-me', i === this.me);
+      el.classList.toggle('is-out', !p.active);
+      el.classList.toggle('is-win', this.game.winnerSeat === i);
 
       if (moved && !silent) {
         el.classList.remove('is-hopping');
@@ -270,7 +356,7 @@ export class Board {
         } else {
           sfx.step();
         }
-        this._puff(p.r, p.c, i);
+        this._puff(p.r, p.c, skin);
       }
     }
   }
@@ -281,7 +367,7 @@ export class Board {
     if (!this.interactive || !this.game || this.game.winner !== null) return;
     this.legal = pawnMoves(this.game, this.game.turn);
     for (const m of this.legal) {
-      const v = this._view(m.r, m.c);
+      const v = this._viewCell(m.r, m.c);
       layer.append(h('div', {
         class: `move-dot ${m.jump ? 'is-jump' : ''}`,
         style: { '--r': v.r, '--c': v.c },
@@ -293,20 +379,20 @@ export class Board {
 
   _syncPath() {
     const layer = clear(this.layers.path);
-    if (!store.showPath || !this.game || this.game.winner !== null) return;
-    const seat = this.interactive ? this.game.turn : this.mySeat;
-    const path = shortestPath(this.game, seat);
+    if (!store.showPath || !this.game || this.game.winner !== null || !this.cell) return;
+    const idx = this.interactive ? this.game.turn : this.me;
+    const path = shortestPath(this.game, idx);
     if (!path || path.length < 2) return;
     const step = this.cell + this.gap;
     const half = this.cell / 2;
     const pts = path.map(({ r, c }) => {
-      const v = this._view(r, c);
+      const v = this._viewCell(r, c);
       return `${v.c * step + half},${v.r * step + half}`;
     });
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     p.setAttribute('d', 'M' + pts.join(' L'));
-    p.setAttribute('stroke', seat === 0 ? 'rgba(248,113,113,.85)' : 'rgba(228,228,231,.8)');
+    p.setAttribute('stroke', (this.skins[idx] || seatSkin(0)).hi);
     svg.append(p);
     layer.append(svg);
   }
@@ -340,7 +426,6 @@ export class Board {
         return;
       }
 
-      // касание: первый тап — прицел, второй — постановка
       if (e.pointerType === 'touch') {
         this._updateHover(e);
         const same = this.armed
@@ -364,7 +449,6 @@ export class Board {
     hit.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       this._flipOrient();
-      if (this._lastEvent) this._updateHover(this._lastEvent);
     });
 
     hit.addEventListener('wheel', (e) => {
@@ -384,18 +468,17 @@ export class Board {
     window.addEventListener('keydown', this._onKey);
   }
 
-  /** Повернуть стену. Ghost перерисовывается сразу, курсор двигать не нужно. */
+  /** Повернуть стену. Призрак перерисовывается сразу. */
   _flipOrient() {
     this.prefOrient = this.prefOrient === H ? V : H;
     this.opts.onOrient?.(this.prefOrient);
     if (this.hover && this.hover.kind === 'wall') {
-      this.hover = { ...this.hover, o: this.prefOrient };
+      this.hover = { ...this.hover, o: this._boardOrient(this.prefOrient) };
       this._showGhost(this.hover);
     }
     return this.prefOrient;
   }
 
-  /** Публичный переключатель — для кнопки над доской. */
   toggleOrientation() { return this._flipOrient(); }
   get orientation() { return this.prefOrient; }
 
@@ -403,15 +486,13 @@ export class Board {
     const rect = this.board.getBoundingClientRect();
     const size = rect.width;
     if (!size) return null;
-    let x = e.clientX - rect.left;
-    let y = e.clientY - rect.top;
-    if (this.flip) { x = size - x; y = size - y; }
-    return this._targetAt(x, y);
+    const pt = this._boardPoint(e.clientX - rect.left, e.clientY - rect.top, size);
+    return this._targetAt(pt.x, pt.y);
   }
 
   /**
-   * Что под курсором. Ориентация стены НЕ зависит от положения курсора —
-   * её задаёт только игрок (R / ПКМ / колесо), иначе стена «прыгает».
+   * Что под курсором. Угол стены задаёт только игрок (R, ПКМ, колесо),
+   * от положения курсора он не зависит.
    */
   _targetAt(x, y) {
     const step = this.cell + this.gap;
@@ -419,19 +500,15 @@ export class Board {
     const row = clamp(Math.floor(y / step), 0, N - 1);
     const rx = x - col * step;
     const ry = y - row * step;
-    const pad = Math.min(7, this.gap * 0.7);       // «магнит» к пазу
+    const pad = Math.min(7, this.gap * 0.7);
     const inV = col < N - 1 && rx > this.cell - pad;
     const inH = row < N - 1 && ry > this.cell - pad;
 
-    // курсор внутри клетки — это ход фишкой
     if (!inV && !inH) return { kind: 'cell', r: row, c: col };
 
-    // курсор в пазу — ближайший перекрёсток под текущим углом стены
-    const o = this.prefOrient;
-    const cx = (x - this.cell - this.gap / 2) / step;
-    const cy = (y - this.cell - this.gap / 2) / step;
-    const c = clamp(Math.round(cx), 0, W - 1);
-    const r = clamp(Math.round(cy), 0, W - 1);
+    const o = this._boardOrient(this.prefOrient);
+    const c = clamp(Math.round((x - this.cell - this.gap / 2) / step), 0, W - 1);
+    const r = clamp(Math.round((y - this.cell - this.gap / 2) / step), 0, W - 1);
     return { kind: 'wall', o, r, c };
   }
 
@@ -456,20 +533,19 @@ export class Board {
     if (!g) return;
     const seat = g.turn;
     const chk = checkWall(g, seat, target.r, target.c, target.o);
-
     const v = this._viewWall(target.r, target.c, target.o);
+    const skin = this.skins[seat] || seatSkin(0);
+
     if (!this.ghostEl) {
-      this.ghostEl = h('div', { class: 'wall wall--ghost' },
-        h('div', { class: 'wall__core' }));
+      this.ghostEl = h('div', { class: 'wall wall--ghost' }, h('div', { class: 'wall__core' }));
       this.layers.ghost.append(this.ghostEl);
     }
     const el = this.ghostEl;
-    el.className = `wall wall--ghost wall--${target.o === H ? 'h' : 'v'} `
-      + (chk.ok ? `is-ok--p${seat}` : 'is-bad');
+    el.className = `wall wall--ghost wall--${v.o === H ? 'h' : 'v'} ${chk.ok ? 'is-ok' : 'is-bad'}`;
     el.style.setProperty('--r', v.r);
     el.style.setProperty('--c', v.c);
+    el.style.setProperty('--g-color', chk.ok ? skin.hi : '#ef4444');
 
-    // подпись показываем только когда стену поставить нельзя
     const reason = g.players[seat].walls <= 0
       ? 'Стены закончились'
       : (chk.ok ? null : chk.message);
@@ -480,7 +556,6 @@ export class Board {
       this.layers.ghost.append(this.tagEl);
     }
     const step = this.cell + this.gap;
-    this.tagEl.className = 'ghost-tag is-bad';
     this.tagEl.textContent = reason;
     this.tagEl.style.left = (v.c * step + this.cell + this.gap / 2) + 'px';
     this.tagEl.style.top = (v.r * step + this.cell + this.gap / 2 - this.cell * 0.55) + 'px';
@@ -524,7 +599,8 @@ export class Board {
     sfx.wall();
     this.shake();
 
-    const color = w.by === 1 ? 'rgba(244,244,245,.95)' : 'rgba(248,113,113,.95)';
+    const skin = this.skins[w.by] || seatSkin(0);
+    const color = skin.hi;
     const step = this.cell + this.gap;
     const v = this._viewWall(w.r, w.c, w.o);
     const cx = v.c * step + this.cell + this.gap / 2;
@@ -537,36 +613,27 @@ export class Board {
     this.layers.fx.append(shock);
     setTimeout(() => shock.remove(), 620);
 
-    // вспышка по всей длине стены
     const flash = h('div', {
       class: 'fx-flash',
-      style: w.o === H
-        ? {
-            left: (v.c * step) + 'px', top: (cy - 1.5) + 'px',
-            width: (2 * this.cell + this.gap) + 'px', height: '3px',
-          }
-        : {
-            left: (cx - 1.5) + 'px', top: (v.r * step) + 'px',
-            width: '3px', height: (2 * this.cell + this.gap) + 'px',
-          },
+      style: v.o === H
+        ? { left: (v.c * step) + 'px', top: (cy - 1.5) + 'px', width: (2 * this.cell + this.gap) + 'px', height: '3px' }
+        : { left: (cx - 1.5) + 'px', top: (v.r * step) + 'px', width: '3px', height: (2 * this.cell + this.gap) + 'px' },
     });
     this.layers.fx.append(flash);
     setTimeout(() => flash.remove(), 340);
 
-    // пыль
-    const count = 9;
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < 9; i++) {
       const d = h('div', {
         class: 'fx-dust',
         style: { left: cx + 'px', top: cy + 'px', '--fx-color': color },
       });
       this.layers.fx.append(d);
-      const angle = w.o === H
+      const angle = v.o === H
         ? (Math.random() * Math.PI - Math.PI / 2) * (i % 2 ? 1 : -1)
         : (Math.random() * Math.PI) + (i % 2 ? 0 : Math.PI);
       const dist = this.cell * (0.35 + Math.random() * 0.85);
-      const dx = Math.cos(angle) * dist * (w.o === H ? 1.5 : 0.7);
-      const dy = Math.sin(angle) * dist * (w.o === H ? 0.7 : 1.5);
+      const dx = Math.cos(angle) * dist * (v.o === H ? 1.5 : 0.7);
+      const dy = Math.sin(angle) * dist * (v.o === H ? 0.7 : 1.5);
       d.animate([
         { transform: 'translate(-50%,-50%) scale(1)', opacity: .9 },
         { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(.1)`, opacity: 0 },
@@ -575,25 +642,23 @@ export class Board {
     }
   }
 
-  _puff(r, c, seat) {
+  _puff(r, c, skin) {
     const step = this.cell + this.gap;
-    const v = this._view(r, c);
+    const v = this._viewCell(r, c);
     const cx = v.c * step + this.cell / 2;
     const cy = v.r * step + this.cell / 2;
-    const color = seat === 1 ? 'rgba(228,228,231,.7)' : 'rgba(248,113,113,.7)';
     const ring = h('div', {
       class: 'fx-shock',
-      style: { left: cx + 'px', top: cy + 'px', '--fx-color': color },
+      style: { left: cx + 'px', top: cy + 'px', '--fx-color': skin.glow },
     });
     ring.style.animationDuration = '420ms';
     this.layers.fx.append(ring);
     setTimeout(() => ring.remove(), 460);
   }
 
-  celebrate(seat) {
-    const colors = seat === 0
-      ? ['#ef4444', '#dc2626', '#fca5a5', '#fff']
-      : ['#e4e4e7', '#a1a1aa', '#fafafa', '#dc2626'];
+  celebrate(playerIndex) {
+    const skin = this.skins[playerIndex] || seatSkin(0);
+    const colors = [skin.hi, skin.mid, '#ffffff', skin.lo];
     const rect = this.board.getBoundingClientRect();
     for (let i = 0; i < 70; i++) {
       const p = h('div', {
@@ -628,3 +693,5 @@ export class Board {
     this.overlayEl = null;
   }
 }
+
+export { SEATS };

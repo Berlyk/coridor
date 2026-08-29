@@ -1,4 +1,4 @@
-/* Игра против бота — полностью на клиенте, сервер не нужен. */
+/* Игра против бота: полностью на клиенте, сервер не нужен. */
 
 import {
   createGame, applyMove, serialize, deserialize, cloneGame, moveName, distanceToGoal,
@@ -8,8 +8,9 @@ import { LEVELS, LEVEL_BY_ID, thinkDelay, chooseMove } from '/shared/ai.js';
 import { h, clear, icon, toast, plural } from '../ui.js';
 import { store } from '../store.js';
 import { sfx } from '../sound.js';
+import { botReward, fmt } from '../economy.js';
 import { Board } from '../board.js';
-import { PlayerCard, panel, turnPill, gameLayout } from './game-ui.js';
+import { PlayerCard, panel, turnPill, gameLayout, rotateButton } from './game-ui.js';
 
 export function renderBot(mount) {
   let view = null;
@@ -32,7 +33,6 @@ export function renderBot(mount) {
   }
 
   setup();
-
   return { destroy() { view?.destroy?.(); } };
 }
 
@@ -49,13 +49,7 @@ function renderSetup(mount, state, onStart) {
       const active = lv.id === state.level;
       const stats = store.stats.bot[lv.id] || [0, 0];
       levelCards.append(h('button', {
-        class: 'tile',
-        style: {
-          textAlign: 'left',
-          borderColor: active ? 'var(--red)' : 'var(--border)',
-          background: active ? 'linear-gradient(140deg, rgba(220,38,38,.14), var(--card-2))' : 'var(--card-2)',
-          transform: active ? 'translateY(-2px)' : 'none',
-        },
+        class: `tile level-card ${active ? 'is-active' : ''}`,
         onClick: () => { state.level = lv.id; store.botLevel = lv.id; repaint(); },
       },
         h('div', { class: 'hstack' },
@@ -69,7 +63,9 @@ function renderSetup(mount, state, onStart) {
               width: '18px', height: '4px', borderRadius: '2px',
               background: i <= LEVELS.indexOf(lv) ? 'var(--red)' : 'var(--card-3)',
             },
-          })))));
+          }))),
+        h('div', { class: 'tile__v', style: { marginTop: '8px', color: 'var(--muted-3)' } },
+          `награда за победу ${fmt(botReward(lv.id, true))}`)));
     }
   };
   repaint();
@@ -77,11 +73,10 @@ function renderSetup(mount, state, onStart) {
   const sideSeg = h('div', { class: 'seg seg--block' });
   const paintSide = () => {
     clear(sideSeg);
-    for (const [seat, label, sub] of [[0, 'Снизу (красные)', 'ходите первым'], [1, 'Сверху (белые)', 'ходит бот']]) {
+    for (const [seat, label] of [[0, 'Снизу, ходите первым'], [1, 'Сверху, ходит бот']]) {
       sideSeg.append(h('button', {
         class: `seg__btn ${state.mySeat === seat ? 'is-active' : ''}`,
         onClick: () => { state.mySeat = seat; store.botSide = seat; paintSide(); },
-        title: sub,
       }, label));
     }
   };
@@ -102,7 +97,7 @@ function renderSetup(mount, state, onStart) {
   mount.append(h('div', { class: 'wrap wrap--narrow stack stack--lg' },
     h('div', {},
       h('div', { class: 'eyebrow' }, 'Одиночная игра'),
-      h('h2', { class: 'h1', style: { fontSize: 'clamp(30px,5vw,48px)', marginTop: '6px' } }, 'ПАРТИЯ С БОТОМ')),
+      h('h2', { class: 'h1', style: { fontSize: 'clamp(28px,5vw,48px)', marginTop: '6px' } }, 'ПАРТИЯ С БОТОМ')),
     panel('Уровень соперника', levelCards),
     h('div', { class: 'grid-2' },
       panel('Ваша сторона', sideSeg),
@@ -121,7 +116,7 @@ function renderGame(mount, cfg, onBack) {
   const botSeat = 1 - cfg.mySeat;
   const level = LEVEL_BY_ID[cfg.level];
 
-  let game = createGame({ wallsPerPlayer: cfg.walls });
+  let game = createGame({ mode: 'duel', wallsPerPlayer: cfg.walls });
   let busy = false;
   let finished = false;
   const undoStack = [];
@@ -169,28 +164,20 @@ function renderGame(mount, cfg, onBack) {
   const board = new Board({
     onMove: (mv) => humanMove(mv),
     onIllegal: (msg) => toast(msg, 'err', 1800),
-    onOrient: () => paintRotate(),
+    onOrient: () => rotate.paint(),
   });
 
+  const rotate = rotateButton(() => board);
   const pill = turnPill();
-  const cards = [new PlayerCard(0), new PlayerCard(1)];
+  const cards = [new PlayerCard(), new PlayerCard()];
 
   const btnUndo = h('button', { class: 'btn btn--sm btn--ghost', onClick: undo }, icon('undo', 14), 'Отменить');
   const btnHint = h('button', { class: 'btn btn--sm btn--ghost', onClick: hint }, icon('route', 14), 'Подсказка');
   const btnNew = h('button', { class: 'btn btn--sm btn--ghost', onClick: restart }, icon('rotate', 14), 'Заново');
   const btnQuit = h('button', { class: 'btn btn--sm btn--outline', onClick: onBack }, icon('back', 14), 'Уровень');
 
-  const btnRotate = h('button', {
-    class: 'btn btn--sm btn--ghost',
-    title: 'Повернуть стену (R)',
-    onClick: () => board.toggleOrientation(),
-  });
-
   const boardBar = h('div', { class: 'board-bar' },
-    pill.el,
-    btnRotate,
-    h('div', { class: 'spacer' }),
-    btnHint, btnUndo, btnNew, btnQuit);
+    pill.el, rotate.el, h('div', { class: 'spacer' }), btnHint, btnUndo, btnNew, btnQuit);
 
   const stage = h('div', { class: 'board-stage' });
   board.mount(stage);
@@ -206,56 +193,44 @@ function renderGame(mount, cfg, onBack) {
   ];
 
   mount.append(gameLayout(stage, side));
+  rotate.paint();
 
   /* ---------- логика ---------- */
 
   function paint(opts = {}) {
     const myTurn = !finished && game.winner === null && game.turn === cfg.mySeat && !busy;
     board.update(game, {
-      mySeat: cfg.mySeat,
-      flip: cfg.mySeat === 1,
+      me: cfg.mySeat,
       interactive: myTurn,
       lastMove: game.history[game.history.length - 1] || null,
+      skins: [cfg.mySeat === 0 ? store.skin : null, cfg.mySeat === 1 ? store.skin : null],
       silent: opts.silent,
     });
 
     for (const seat of [0, 1]) {
       const isBot = seat === botSeat;
+      const d = distanceToGoal(game, seat);
       cards[seat].update({
-        name: isBot ? `Бот · ${level.label}` : store.name,
+        name: isBot ? `Бот: ${level.label}` : store.name,
+        skin: board.skins[seat],
         isBot,
         isMe: !isBot,
         isTurn: game.winner === null && game.turn === seat,
         walls: game.players[seat].walls,
         wallsMax: cfg.walls,
-        sub: `до цели ${distToText(seat)}`,
+        sub: d === Infinity ? '' : `до цели ${d} ${plural(d, 'шаг', 'шага', 'шагов')}`,
         clockMs: null,
       });
     }
 
-    paintRotate();
+    rotate.paint();
     btnUndo.disabled = busy || finished || undoStack.length === 0;
     btnHint.disabled = busy || finished || game.turn !== cfg.mySeat;
 
-    if (finished) return;
-    if (game.winner !== null) return;
+    if (finished || game.winner !== null) return;
     if (busy) pill.thinking('Бот думает');
     else if (game.turn === cfg.mySeat) pill.set('Ваш ход', 'me');
     else pill.set('Ход бота', '');
-  }
-
-  function paintRotate() {
-    clear(btnRotate);
-    const horizontal = board.orientation === 1;
-    btnRotate.append(
-      h('span', { class: `wall-icon ${horizontal ? 'is-h' : 'is-v'}` }),
-      h('span', {}, horizontal ? 'Стена: горизонтально' : 'Стена: вертикально'),
-      h('span', { class: 'kbd' }, 'R'));
-  }
-
-  function distToText(seat) {
-    const d = distanceToGoal(game, seat);
-    return d === Infinity ? '—' : `${d} ${plural(d, 'шаг', 'шага', 'шагов')}`;
   }
 
   function humanMove(mv) {
@@ -274,14 +249,10 @@ function renderGame(mount, cfg, onBack) {
     paint();
     const t0 = performance.now();
     let mv = null;
-    try {
-      mv = await askBot(botSeat, cfg.level);
-    } catch {
-      mv = chooseMove(cloneGame(game), botSeat, 'medium');
-    }
+    try { mv = await askBot(botSeat, cfg.level); }
+    catch { mv = chooseMove(cloneGame(game), botSeat, 'medium'); }
     if (finished) return;
-    const wait = Math.max(0, thinkDelay(cfg.level) - (performance.now() - t0));
-    await sleep(wait);
+    await sleep(Math.max(0, thinkDelay(cfg.level) - (performance.now() - t0)));
     if (finished) return;
 
     busy = false;
@@ -295,15 +266,15 @@ function renderGame(mount, cfg, onBack) {
     if (game.winner !== null) finish();
   }
 
-  function finish(forced, reason) {
+  function finish(forcedTeam, reason) {
     finished = true;
-    const winner = forced !== undefined ? forced : game.winner;
+    const winner = forcedTeam !== undefined ? forcedTeam : game.winner;
     const iWon = winner === cfg.mySeat;
     store.recordBot(cfg.level, iWon);
+    const gain = store.earn(botReward(cfg.level, iWon));
     paint();
     board.update(game, { interactive: false, silent: true });
-    if (iWon) { sfx.win(); board.celebrate(cfg.mySeat); }
-    else sfx.lose();
+    if (iWon) { sfx.win(); board.celebrate(cfg.mySeat); } else sfx.lose();
 
     board.showOverlay(h('div', {},
       h('div', { class: `overlay__title ${iWon ? 'is-win' : 'is-lose'}` }, iWon ? 'Победа' : 'Поражение'),
@@ -311,6 +282,8 @@ function renderGame(mount, cfg, onBack) {
         reason === 'stuck' ? 'Бот не нашёл ход'
           : iWon ? `Вы обыграли уровень «${level.label}» за ${game.history.length} ходов`
             : `Бот «${level.label}» дошёл первым`),
+      h('div', { class: 'overlay__sub', style: { color: 'var(--ok)', fontWeight: '700' } },
+        `Начислено ${fmt(gain)}`),
       h('div', { class: 'overlay__actions' },
         h('button', { class: 'btn btn--primary', onClick: restart }, icon('rotate'), 'Ещё партия'),
         h('button', { class: 'btn btn--ghost', onClick: onBack }, icon('back'), 'Сменить уровень'))));
@@ -319,12 +292,10 @@ function renderGame(mount, cfg, onBack) {
 
   function restart() {
     board.hideOverlay();
-    game = createGame({ wallsPerPlayer: cfg.walls });
+    game = createGame({ mode: 'duel', wallsPerPlayer: cfg.walls });
     undoStack.length = 0;
     finished = false;
     busy = false;
-    board.update(game, { silent: true, interactive: false });
-    // синхронизируем стены: старые снимаем
     paint({ silent: true });
     sfx.start();
     if (game.turn === botSeat) setTimeout(botTurn, 400);
@@ -332,9 +303,7 @@ function renderGame(mount, cfg, onBack) {
 
   function undo() {
     if (!undoStack.length || busy || finished) return;
-    const snap = undoStack.pop();
-    game = deserialize(snap);
-    board.update(game, { silent: true, interactive: false });
+    game = deserialize(undoStack.pop());
     paint({ silent: true });
     toast('Ход отменён');
   }
@@ -345,22 +314,19 @@ function renderGame(mount, cfg, onBack) {
     const mv = await askBot(cfg.mySeat, 'hard').catch(() => null);
     btnHint.disabled = false;
     if (!mv) return;
-    if (mv.type === 'move') {
-      toast(`Совет: пойти на ${moveName(mv)}`, 'ok', 4000);
-    } else {
-      toast(`Совет: поставить стену ${moveName(mv)}`, 'ok', 4000);
-    }
+    toast(mv.type === 'move'
+      ? `Совет: пойти на ${moveName(mv)}`
+      : `Совет: поставить стену ${moveName(mv)}`, 'ok', 4000);
     flashHint(mv);
   }
 
   function flashHint(mv) {
     const layer = board.layers.fx;
     const step = board.cell + board.gap;
-    const flip = cfg.mySeat === 1;
-    const vr = (r, c) => (flip ? { r: 8 - r, c: 8 - c } : { r, c });
+    let el;
     if (mv.type === 'move') {
-      const v = vr(mv.r, mv.c);
-      const el = h('div', {
+      const v = board._viewCell(mv.r, mv.c);
+      el = h('div', {
         style: {
           position: 'absolute',
           left: (v.c * step) + 'px', top: (v.r * step) + 'px',
@@ -369,13 +335,10 @@ function renderGame(mount, cfg, onBack) {
           border: '2px solid #22c55e', boxShadow: '0 0 24px rgba(34,197,94,.6)',
         },
       });
-      layer.append(el);
-      el.animate([{ opacity: 0 }, { opacity: 1 }, { opacity: 0 }], { duration: 1600, iterations: 2 });
-      setTimeout(() => el.remove(), 3300);
     } else {
-      const v = flip ? { r: 7 - mv.r, c: 7 - mv.c } : { r: mv.r, c: mv.c };
-      const el = h('div', {
-        class: `wall wall--${mv.o === 1 ? 'h' : 'v'}`,
+      const v = board._viewWall(mv.r, mv.c, mv.o);
+      el = h('div', {
+        class: `wall wall--${v.o === 1 ? 'h' : 'v'}`,
         style: {
           '--r': v.r, '--c': v.c,
           background: 'rgba(34,197,94,.35)',
@@ -383,16 +346,15 @@ function renderGame(mount, cfg, onBack) {
           border: '1px solid #22c55e',
         },
       });
-      layer.append(el);
-      el.animate([{ opacity: 0 }, { opacity: 1 }, { opacity: 0 }], { duration: 1600, iterations: 2 });
-      setTimeout(() => el.remove(), 3300);
     }
+    layer.append(el);
+    el.animate([{ opacity: 0 }, { opacity: 1 }, { opacity: 0 }], { duration: 1600, iterations: 2 });
+    setTimeout(() => el.remove(), 3300);
   }
 
   const onSettings = () => paint({ silent: true });
   window.addEventListener('coridor:settings', onSettings);
 
-  // старт
   paint({ silent: true });
   sfx.start();
   if (game.turn === botSeat) setTimeout(botTurn, 500);
@@ -403,7 +365,6 @@ function renderGame(mount, cfg, onBack) {
       window.removeEventListener('coridor:settings', onSettings);
       worker?.terminate();
       board.destroy();
-      window.removeEventListener('keydown', board._onKey);
     },
   };
 }

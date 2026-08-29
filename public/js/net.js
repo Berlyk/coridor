@@ -63,7 +63,7 @@ export function connect() {
 
   ws.addEventListener('open', () => {
     retry = 0;
-    send({ type: 'hello', clientId: store.clientId, name: store.name });
+    send({ type: 'hello', clientId: store.clientId, name: store.name, skin: store.skin });
     for (const m of queue.splice(0)) raw(m);
     clearInterval(pingTimer);
     pingTimer = setInterval(() => send({ type: 'ping', t: Date.now() }), 20000);

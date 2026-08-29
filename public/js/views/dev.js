@@ -1,83 +1,136 @@
-/* Раздел «Разработка»: из чего собрана игра, что уже готово и что впереди. */
+/* Раздел «Разработка»: сборка, список релизов, отчёт об ошибке. */
 
-import { h, icon } from '../ui.js';
+import { h, clear, icon, modal, copyText, toast } from '../ui.js';
 
-const VERSION = '1.0.0';
+export const BUILD = 'Beta 0.3';
+const REPO = 'https://github.com/Berlyk/coridor';
+const PER_PAGE = 2;
 
-const DONE = [
-  ['Правила Quoridor', 'Доска 9×9, стены, прыжки и диагонали, запрет полного перекрытия пути'],
-  ['Онлайн 1 на 1', 'Комнаты с кодом, приватные с паролем, наблюдатели, чат, реванш'],
-  ['Боты', 'Четыре уровня: от жадной эвристики до перебора на шесть полуходов'],
-  ['Анимации', 'Постройка стены с ударной волной и пылью, пружинные ходы фишки'],
-  ['Переподключение', '45 секунд на возврат в партию после обрыва связи'],
-  ['Быстрый подбор', 'Двое в очереди — сразу партия по минуте на ход'],
-  ['Магазин скинов', 'Семь наборов цветов, открываются за победы'],
-];
-
-const NEXT = [
-  ['Рейтинг', 'Общая таблица и очки за онлайн-партии'],
-  ['Разбор партий', 'Перемотка ходов и оценка позиции ботом'],
-  ['Турниры', 'Сетка на 4–16 игроков внутри лобби'],
-  ['Игра на четверых', 'Классический режим Quoridor с четырьмя фишками и пятью стенами'],
-  ['Профиль на сервере', 'Чтобы прогресс и скины не терялись при смене браузера'],
-];
-
-const STACK = [
-  ['Сервер', 'Node.js без зависимостей: свой WebSocket по RFC 6455 и раздача статики'],
-  ['Клиент', 'ES-модули без сборщика, вся анимация — CSS и Web Animations API'],
-  ['Правила', 'Одно ядро на сервере и в браузере, сервер — источник истины'],
-  ['Бот', 'Negamax с alpha-beta в Web Worker, чтобы интерфейс не подвисал'],
-  ['Звук', 'WebAudio, синтез на лету — в проекте нет ни одного аудиофайла'],
+const RELEASES = [
+  {
+    version: 'Beta 0.3',
+    date: '29.08.2026',
+    title: 'Новые режимы, игровая валюта и магазин',
+    items: [
+      'Добавлен режим «Трое»: три фишки на доске, каждый сам за себя.',
+      'Добавлен режим «Каждый сам за себя» на четырёх игроков.',
+      'Добавлен командный режим 2 на 2: партнёры стоят напротив друг друга.',
+      'Добавлен режим 2 на 1: одиночка ходит дважды за ход и получает вдвое больше стен.',
+      'Добавлена игровая валюта «стены», она начисляется за каждую сыгранную партию.',
+      'Магазин переведён на валюту, скины теперь меняют форму фишки и фактуру стены.',
+      'Скин виден соперникам: он передаётся вместе с профилем в комнату.',
+      'Переписан звук: компрессор, небольшая комната и отдельные огибающие для каждого события.',
+      'Доска научилась поворачиваться под любое из четырёх мест.',
+      'Улучшена синхронизация: клиент замечает пропущенное сообщение и запрашивает состояние заново.',
+      'Добавлены Политика конфиденциальности, Пользовательское соглашение и Публичная оферта.',
+      'Убраны кнопки готовности и занятия места: игроки рассаживаются автоматически.',
+      'Вход по коду убран из лобби, приглашение отправляется ссылкой.',
+      'В настройки партии добавлены короткие таймеры от 5 секунд.',
+      'Переработана мобильная вёрстка на всех экранах.',
+    ],
+  },
+  {
+    version: 'Beta 0.2',
+    date: '28.08.2026',
+    title: 'Магазин, раздел разработки и правки управления',
+    items: [
+      'Добавлен магазин скинов и раздел «Разработка».',
+      'Разделы «Быстрый вход» и «Открытые комнаты» переехали под навигацию.',
+      'Угол стены перестал зависеть от положения курсора, поворот только по R.',
+      'Убрана подсказка о длине маршрута при наведении на паз.',
+      'Убрана история ходов из боковой панели.',
+      'Исправлено переполнение подсказок и правил на узких экранах.',
+    ],
+  },
+  {
+    version: 'Beta 0.1',
+    date: '28.08.2026',
+    title: 'Первый запуск',
+    items: [
+      'Полные правила Quoridor: ходы, прыжки, диагонали, запрет полного перекрытия пути.',
+      'Онлайн-лобби с комнатами, приватным доступом, наблюдателями и чатом.',
+      'Четыре уровня ботов от жадной эвристики до перебора на шесть полуходов.',
+      'Анимация постройки стены с ударной волной, пылью и тряской доски.',
+      'Возврат в партию в течение 45 секунд после обрыва связи.',
+    ],
+  },
 ];
 
 export function renderDev(mount) {
-  mount.append(h('div', { class: 'wrap stack stack--lg' },
-    h('div', {},
-      h('div', { class: 'eyebrow' }, `версия ${VERSION}`),
-      h('h2', { class: 'h1', style: { fontSize: 'clamp(30px,5vw,48px)', marginTop: '6px' } }, 'РАЗРАБОТКА'),
-      h('p', { class: 'lead', style: { marginTop: '14px', maxWidth: '60ch' } },
-        'Коридор написан с нуля: ни игрового движка, ни фреймворка, ни одной npm-зависимости. '
-        + 'Ниже — что уже работает, что в планах и как всё устроено внутри.')),
+  let page = 0;
+  const pages = Math.ceil(RELEASES.length / PER_PAGE);
+  const list = h('div', { class: 'stack' });
+  const pager = h('div', { class: 'pager' });
 
-    h('div', { class: 'dev-grid' },
-      block('Уже работает', 'check', DONE, 'ok'),
-      block('В планах', 'zap', NEXT, 'warn')),
+  mount.append(h('div', { class: 'wrap wrap--narrow stack stack--lg' },
+    h('div', { class: 'card card--pad build-card' },
+      h('div', { class: 'build-badge' },
+        h('div', { class: 'eyebrow' }, 'build'),
+        h('div', { class: 'build-badge__value' }, BUILD)),
+      h('button', { class: 'btn btn--ghost', onClick: reportBug },
+        icon('info', 16), 'Сообщить о баге')),
+    list,
+    pager));
 
-    h('div', { class: 'card card--pad' },
-      h('div', { class: 'hstack', style: { marginBottom: '14px' } },
-        icon('settings', 18),
-        h('div', { class: 'h3' }, 'Как это устроено')),
-      h('div', { class: 'stack' },
-        STACK.map(([k, v]) => h('div', { class: 'row' },
+  paint();
+
+  function paint() {
+    clear(list);
+    const slice = RELEASES.slice(page * PER_PAGE, page * PER_PAGE + PER_PAGE);
+    for (const r of slice) {
+      list.append(h('article', { class: 'card card--pad release' },
+        h('div', { class: 'hstack hstack--wrap' },
           h('div', { class: 'row__main' },
-            h('div', { class: 'row__title' }, k),
-            h('div', { class: 'row__sub' }, v)))))),
+            h('h3', { class: 'release__title' }, `Релиз ${r.version}: ${r.title}`)),
+          h('span', { class: 'badge' }, r.date)),
+        h('div', { class: 'release__version' }, `Версия: ${r.version}`),
+        h('ul', { class: 'release__list' },
+          r.items.map((t) => h('li', {}, t)))));
+    }
 
-    h('div', { class: 'card card--hero card--pad' },
-      h('div', { class: 'hstack hstack--wrap' },
-        h('div', { class: 'row__main' },
-          h('div', { class: 'h3' }, 'Нашли баг или есть идея?'),
-          h('div', { class: 'dim-2', style: { marginTop: '4px' } },
-            'Пишите в issues репозитория — правки прилетают в игру без обновления клиента')),
-        h('a', {
-          class: 'btn btn--primary',
-          href: 'https://github.com/Berlyk/coridor',
-          target: '_blank',
-          rel: 'noopener noreferrer',
-        }, icon('share'), 'Открыть на GitHub')))));
+    clear(pager);
+    pager.append(
+      h('button', {
+        class: 'btn btn--sm btn--ghost', disabled: page === 0,
+        onClick: () => { page = Math.max(0, page - 1); paint(); },
+      }, '< Пред.'),
+      h('span', { class: 'dim-2' }, `Страница ${page + 1} из ${pages}`),
+      h('button', {
+        class: 'btn btn--sm btn--ghost', disabled: page >= pages - 1,
+        onClick: () => { page = Math.min(pages - 1, page + 1); paint(); },
+      }, 'След. >'));
+  }
+
+  async function reportBug() {
+    const info = [
+      `Сборка: ${BUILD}`,
+      `Экран: ${window.innerWidth}x${window.innerHeight}`,
+      `Браузер: ${navigator.userAgent}`,
+    ].join('\n');
+
+    await modal({
+      title: 'Сообщить о баге',
+      sub: 'Опишите, что пошло не так, и приложите эти данные',
+      body: h('div', { class: 'stack stack--lg' },
+        h('p', { class: 'dim' },
+          'Ошибки принимаются в issues репозитория. Опишите, что вы делали, '
+          + 'что ожидали увидеть и что произошло на самом деле.'),
+        h('pre', { class: 'code-block' }, info),
+        h('div', { class: 'hstack hstack--wrap' },
+          h('button', {
+            class: 'btn btn--ghost btn--sm',
+            onClick: async () => {
+              if (await copyText(info)) toast('Данные скопированы', 'ok');
+            },
+          }, icon('copy', 14), 'Скопировать данные'),
+          h('a', {
+            class: 'btn btn--primary btn--sm',
+            href: `${REPO}/issues/new`,
+            target: '_blank', rel: 'noopener noreferrer',
+          }, icon('share', 14), 'Открыть issues'))),
+      actions: [{ label: 'Закрыть', class: 'btn--ghost', value: true }],
+    });
+  }
 
   return { destroy() {} };
-}
-
-function block(title, ico, rows, badge) {
-  return h('div', { class: 'card card--pad' },
-    h('div', { class: 'hstack', style: { marginBottom: '14px' } },
-      icon(ico, 18),
-      h('div', { class: 'h3' }, title),
-      h('div', { class: 'spacer' }),
-      h('span', { class: `badge badge--${badge}` }, String(rows.length))),
-    h('div', { class: 'stack stack--sm' },
-      rows.map(([k, v]) => h('div', { class: 'tile' },
-        h('div', { class: 'tile__k' }, k),
-        h('div', { class: 'tile__v' }, v)))));
 }

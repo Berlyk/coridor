@@ -2,18 +2,18 @@
  * Бот для «Коридора».
  *
  * Четыре уровня:
- *   easy   — «Новичок»: жадный шаг вперёд + много случайности и ошибок
- *   medium — «Любитель»: жадность + простая тактика стен
- *   hard   — «Профи»: negamax + alpha-beta, глубина 4, редкие зевки
- *   expert — «Мастер»: итеративное углубление до 6 полуходов, широкий набор стен
+ *   easy   «Новичок»: жадный шаг вперёд, много случайности и ошибок
+ *   medium «Любитель»: жадность плюс простая тактика стен
+ *   hard   «Профи»: negamax с alpha-beta, глубина 4, редкие зевки
+ *   expert «Мастер»: итеративное углубление до 6 полуходов
  *
- * Все уровни работают на одном ядре правил (shared/quoridor.js) и не мутируют
- * переданное состояние наружу: используется do/undo без клонирования.
+ * Перебор включается только в дуэли. В режимах на трёх и четырёх игроков
+ * бот играет по эвристике: там минимакс на двоих неприменим.
  */
 
 import {
   W, H, V,
-  pawnMoves, distanceToGoal, shortestPath, wallOk, allWalls,
+  pawnMoves, distanceToGoal, shortestPath, wallOk, allWalls, atGoal, advanceTurn,
 } from './quoridor.js';
 
 const MATE = 1e6;
@@ -48,6 +48,41 @@ export const LEVELS = [
 export const LEVEL_BY_ID = Object.fromEntries(LEVELS.map((l) => [l.id, l]));
 
 /* ------------------------------------------------------------------ *
+ * Помощники по составу игроков
+ * ------------------------------------------------------------------ */
+
+function activeCount(g) {
+  let n = 0;
+  for (const p of g.players) if (p.active) n++;
+  return n;
+}
+
+/** Ближайший к своей цели соперник (не из моей команды). */
+function bestFoe(g, p) {
+  const me = g.players[p];
+  let best = -1, bestD = Infinity;
+  for (let i = 0; i < g.players.length; i++) {
+    const q = g.players[i];
+    if (!q.active || q.team === me.team) continue;
+    const d = distanceToGoal(g, i);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return { index: best, dist: bestD };
+}
+
+/** Лучшая (наименьшая) дистанция моей команды. */
+function teamDist(g, team) {
+  let best = Infinity;
+  for (let i = 0; i < g.players.length; i++) {
+    const q = g.players[i];
+    if (!q.active || q.team !== team) continue;
+    const d = distanceToGoal(g, i);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+/* ------------------------------------------------------------------ *
  * do / undo без клонирования
  * ------------------------------------------------------------------ */
 
@@ -56,7 +91,7 @@ function doMove(g, p, mv) {
     const me = g.players[p];
     const undo = { type: 'move', r: me.r, c: me.c, winner: g.winner };
     me.r = mv.r; me.c = mv.c;
-    if (me.r === me.goalRow) g.winner = p;
+    if (atGoal(me)) g.winner = me.team;
     return undo;
   }
   const arr = mv.o === H ? g.h : g.v;
@@ -82,15 +117,17 @@ function undoMove(g, p, mv, undo) {
  * ------------------------------------------------------------------ */
 
 function evaluate(g, p) {
+  const me = g.players[p];
   const dMe = distanceToGoal(g, p);
-  const dOp = distanceToGoal(g, 1 - p);
+  const foe = bestFoe(g, p);
   if (dMe === Infinity) return -MATE;
-  if (dOp === Infinity) return MATE;
+  if (foe.index === -1) return MATE;
+  if (foe.dist === Infinity) return MATE;
   if (dMe === 0) return MATE - 1;
-  if (dOp === 0) return -(MATE - 1);
-  const wMe = g.players[p].walls;
-  const wOp = g.players[1 - p].walls;
-  return (dOp - dMe) * 100 + (wMe - wOp) * 12 - dMe * 4;
+  if (foe.dist === 0) return -(MATE - 1);
+  const wMe = me.walls;
+  const wOp = g.players[foe.index].walls;
+  return (foe.dist - dMe) * 100 + (wMe - wOp) * 12 - dMe * 4;
 }
 
 /* ------------------------------------------------------------------ *
@@ -105,7 +142,7 @@ function pawnCandidates(g, p) {
   const or = me.r, oc = me.c;
   for (const m of raw) {
     me.r = m.r; me.c = m.c;
-    const d = m.r === me.goalRow ? -1 : distanceToGoal(g, p);
+    const d = atGoal(me) ? -1 : distanceToGoal(g, p);
     out.push({ mv: { type: 'move', r: m.r, c: m.c }, score: -d, dist: d });
   }
   me.r = or; me.c = oc;
@@ -113,7 +150,7 @@ function pawnCandidates(g, p) {
   return out;
 }
 
-/** Индексы стен, перекрывающих переход между двумя соседними клетками. */
+/** Стены, перекрывающие переход между двумя соседними клетками. */
 function blockersFor(a, b) {
   const out = [];
   if (a.r === b.r) {
@@ -129,15 +166,17 @@ function blockersFor(a, b) {
 }
 
 /**
- * Кандидаты-стены: те, что стоят на кратчайшем маршруте соперника,
- * плюс стены рядом с обеими фишками. Отсортированы по «выгоде».
+ * Кандидаты-стены: на кратчайшем маршруте ближайшего соперника,
+ * рядом с фишками и как продолжение уже построенных барьеров.
  */
 function wallCandidates(g, p, limit) {
-  if (g.players[p].walls <= 0) return [];
-  const foe = 1 - p;
+  const me = g.players[p];
+  if (!me || me.walls <= 0) return [];
+  const foe = bestFoe(g, p);
+  if (foe.index === -1) return [];
 
-  const baseMe = distanceToGoal(g, p);
-  const baseOp = distanceToGoal(g, foe);
+  const baseMe = teamDist(g, me.team);
+  const baseOp = foe.dist;
 
   const seen = new Set();
   const raw = [];
@@ -149,14 +188,13 @@ function wallCandidates(g, p, limit) {
     raw.push({ r, c, o });
   };
 
-  const path = shortestPath(g, foe);
+  const path = shortestPath(g, foe.index);
   if (path) {
     for (let i = 0; i < path.length - 1 && i < 7; i++) {
       for (const b of blockersFor(path[i], path[i + 1])) add(b.r, b.c, b.o);
     }
   }
-  // «карманы» вокруг фишек — часто именно там рождаются длинные обходы
-  for (const q of [g.players[foe], g.players[p]]) {
+  for (const q of [g.players[foe.index], me]) {
     for (let dr = -1; dr <= 0; dr++) {
       for (let dc = -1; dc <= 0; dc++) {
         add(q.r + dr, q.c + dc, H);
@@ -164,7 +202,6 @@ function wallCandidates(g, p, limit) {
       }
     }
   }
-  // рядом с уже поставленными стенами — продолжение барьера
   for (const w of g.wallList) {
     add(w.r, w.c + 2, w.o);
     add(w.r, w.c - 2, w.o);
@@ -180,11 +217,11 @@ function wallCandidates(g, p, limit) {
     const arr = cand.o === H ? g.h : g.v;
     const i = cand.r * W + cand.c;
     arr[i] = 1;
-    const dMe = distanceToGoal(g, p);
-    const dOp = distanceToGoal(g, foe);
+    const dMe = teamDist(g, me.team);
+    const dOp = distanceToGoal(g, foe.index);
     arr[i] = 0;
     const gain = (dOp - baseOp) - (dMe - baseMe);
-    if (gain <= 0) continue;                 // бессмысленные стены отбрасываем
+    if (gain <= 0) continue;
     scored.push({ mv: { type: 'wall', r: cand.r, c: cand.c, o: cand.o }, score: gain });
   }
   scored.sort((a, b) => b.score - a.score);
@@ -192,7 +229,7 @@ function wallCandidates(g, p, limit) {
 }
 
 /* ------------------------------------------------------------------ *
- * Negamax + alpha-beta
+ * Negamax + alpha-beta (только для дуэли)
  * ------------------------------------------------------------------ */
 
 class Timeout extends Error {}
@@ -204,23 +241,22 @@ function negamax(g, p, depth, alpha, beta, ctx) {
   if (depth <= 0) return evaluate(g, p);
 
   const moves = [];
-  const pawns = pawnCandidates(g, p);
-  for (const x of pawns) moves.push(x.mv);
-  const walls = wallCandidates(g, p, ctx.wallLimit);
-  for (const x of walls) moves.push(x.mv);
+  for (const x of pawnCandidates(g, p)) moves.push(x.mv);
+  for (const x of wallCandidates(g, p, ctx.wallLimit)) moves.push(x.mv);
   if (moves.length === 0) return evaluate(g, p);
+
+  const foeIndex = bestFoe(g, p).index;
+  if (foeIndex === -1) return MATE;
 
   let best = -Infinity;
   for (const mv of moves) {
     const undo = doMove(g, p, mv);
     let score;
-    // finally обязателен: при тайм-ауте исключение раскручивает стек,
-    // и без отката позиция осталась бы «грязной»
     try {
-      if (g.winner === p) {
+      if (g.winner === g.players[p].team) {
         score = MATE - (ctx.rootDepth - depth);
       } else {
-        score = -negamax(g, 1 - p, depth - 1, -beta, -alpha, ctx);
+        score = -negamax(g, foeIndex, depth - 1, -beta, -alpha, ctx);
       }
     } finally {
       undoMove(g, p, mv, undo);
@@ -272,6 +308,7 @@ function pick(arr, rnd) { return arr[Math.floor(rnd() * arr.length)]; }
 
 function playEasy(g, p, rnd) {
   const pawns = pawnCandidates(g, p);
+  if (!pawns.length) return null;
   const roll = rnd();
 
   if (roll < 0.10 && g.players[p].walls > 0) {
@@ -280,25 +317,21 @@ function playEasy(g, p, rnd) {
     const any = allWalls(g, p);
     if (any.length) return pick(any, rnd);
   }
-  if (roll < 0.38 && pawns.length > 1) {
-    // «зевок»: не лучший, но легальный шаг
-    return pick(pawns.slice(1), rnd).mv;
-  }
+  if (roll < 0.38 && pawns.length > 1) return pick(pawns.slice(1), rnd).mv;
   const bestScore = pawns[0].score;
   const ties = pawns.filter((x) => x.score === bestScore);
   return pick(ties, rnd).mv;
 }
 
 function playMedium(g, p, rnd) {
-  const foe = 1 - p;
-  const dMe = distanceToGoal(g, p);
-  const dOp = distanceToGoal(g, foe);
   const pawns = pawnCandidates(g, p);
+  if (!pawns.length) return null;
+  const dMe = distanceToGoal(g, p);
+  const foe = bestFoe(g, p);
 
-  // соперник впереди — пробуем притормозить его стеной
-  if (g.players[p].walls > 0 && dOp <= dMe && rnd() < 0.75) {
+  if (g.players[p].walls > 0 && foe.index !== -1 && foe.dist <= dMe && rnd() < 0.75) {
     const pool = wallCandidates(g, p, 10);
-    if (pool.length && pool[0].score >= (dOp < dMe ? 1 : 2)) {
+    if (pool.length && pool[0].score >= (foe.dist < dMe ? 1 : 2)) {
       const top = pool.filter((x) => x.score === pool[0].score);
       return pick(top, rnd).mv;
     }
@@ -315,24 +348,28 @@ function playMedium(g, p, rnd) {
 
 /**
  * Выбрать ход за игрока p.
- * @param {object} g      состояние (не изменяется по итогу вызова)
- * @param {number} p      индекс игрока
+ * @param {object} g       состояние (не изменяется по итогу вызова)
+ * @param {number} p       индекс игрока
  * @param {string} levelId easy|medium|hard|expert
- * @param {function} rnd  генератор случайных чисел (по умолчанию Math.random)
+ * @param {function} rnd   генератор случайных чисел
  */
 export function chooseMove(g, p, levelId = 'medium', rnd = Math.random) {
   const level = LEVEL_BY_ID[levelId] || LEVEL_BY_ID.medium;
+  let mv = null;
 
-  if (level.id === 'easy') return playEasy(g, p, rnd);
-  if (level.id === 'medium') return playMedium(g, p, rnd);
+  // перебор корректен только когда на доске ровно двое
+  const canSearch = level.depth > 0 && activeCount(g) === 2;
 
-  let mv = searchBest(g, p, level);
-
-  // «Профи» иногда зевает — иначе с ним слишком грустно
-  if (level.id === 'hard' && rnd() < 0.07) {
-    const pawns = pawnCandidates(g, p);
-    if (pawns.length > 1) mv = pawns[1].mv;
+  if (level.id === 'easy') mv = playEasy(g, p, rnd);
+  else if (level.id === 'medium' || !canSearch) mv = playMedium(g, p, rnd);
+  else {
+    mv = searchBest(g, p, level);
+    if (level.id === 'hard' && rnd() < 0.07) {
+      const pawns = pawnCandidates(g, p);
+      if (pawns.length > 1) mv = pawns[1].mv;
+    }
   }
+
   // страховка: возвращаем только заведомо легальный ход
   if (mv && mv.type === 'wall' && !wallOk(g, p, mv.r, mv.c, mv.o)) mv = null;
   if (mv && mv.type === 'move'
@@ -344,7 +381,7 @@ export function chooseMove(g, p, levelId = 'medium', rnd = Math.random) {
   return mv;
 }
 
-/** Простейший «разумный» ход — используется сервером при истечении времени. */
+/** Простейший разумный ход: используется сервером при истечении времени. */
 export function advanceMove(g, p) {
   const pawns = pawnCandidates(g, p);
   return pawns.length ? pawns[0].mv : null;
@@ -356,3 +393,5 @@ export function thinkDelay(levelId, rnd = Math.random) {
   const [a, b] = level.thinkMs;
   return Math.round(a + rnd() * (b - a));
 }
+
+export { advanceTurn };

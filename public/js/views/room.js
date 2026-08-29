@@ -1,12 +1,14 @@
-/* Онлайн-комната: лобби, партия 1 на 1, чат. */
+/* Онлайн-комната: лобби, партия, чат. */
 
-import { deserialize, distanceToGoal } from '/shared/quoridor.js';
+import { deserialize, distanceToGoal, getMode, isTeamMode } from '/shared/quoridor.js';
 import { h, clear, icon, toast, copyText, confirmDialog, plural } from '../ui.js';
 import { store } from '../store.js';
 import { sfx } from '../sound.js';
+import { onlineReward, fmt } from '../economy.js';
 import * as net from '../net.js';
 import { Board } from '../board.js';
-import { PlayerCard, Chat, panel, turnPill, gameLayout } from './game-ui.js';
+import { PlayerCard, Chat, panel, turnPill, gameLayout, rotateButton } from './game-ui.js';
+import { createDialog } from './home.js';
 
 export function renderRoom(mount, code) {
   const offs = [];
@@ -17,108 +19,113 @@ export function renderRoom(mount, code) {
   let lowBeep = 0;
   let overlayShown = false;
   let hasLeftRoom = false;
+  let lastSeq = 0;
+  let resyncAt = 0;
 
   const board = new Board({
     onMove: (mv) => {
       if (!isMyTurn()) return;
       net.send({ type: 'game:move', move: mv });
-      // локально ничего не применяем — ждём подтверждения сервера
     },
     onIllegal: (msg) => toast(msg, 'err', 1800),
-    onOrient: () => paintRotate(),
+    onOrient: () => rotate.paint(),
   });
 
+  const rotate = rotateButton(() => board);
   const pill = turnPill();
-  const cards = [new PlayerCard(0), new PlayerCard(1)];
+  const cards = [];
   const chat = new Chat((text) => net.send({ type: 'chat:send', text }));
 
   /* ---------- шапка ---------- */
 
-  const roomTitle = h('div', { class: 'h3' }, 'Подключение…');
+  const roomTitle = h('div', { class: 'h3' }, 'Подключение');
+  const modeBadge = h('span', { class: 'badge' }, '');
   const codeChip = h('button', {
     class: 'btn btn--sm btn--ghost mono',
     title: 'Скопировать код',
-    onClick: async () => {
-      if (await copyText(code)) toast('Код скопирован', 'ok');
-    },
+    onClick: async () => { if (await copyText(code)) toast('Код скопирован', 'ok'); },
   }, icon('copy', 14), code);
   const linkBtn = h('button', {
     class: 'btn btn--sm btn--ghost',
-    title: 'Скопировать ссылку-приглашение',
     onClick: async () => {
-      const url = `${location.origin}/#/room/${code}`;
-      if (await copyText(url)) toast('Ссылка скопирована', 'ok');
+      if (await copyText(`${location.origin}/#/room/${code}`)) toast('Ссылка скопирована', 'ok');
     },
   }, icon('share', 14), 'Ссылка');
-  const statusChip = h('span', { class: 'badge' }, '—');
+  const manageBtn = h('button', { class: 'btn btn--sm btn--ghost', onClick: openManage },
+    icon('settings', 14), 'Управление');
+  const startBtn = h('button', { class: 'btn btn--sm btn--primary', onClick: () => net.send({ type: 'room:start' }) },
+    icon('play', 14), 'Начать партию');
+  const exitBtn = h('a', { class: 'btn btn--sm btn--outline', href: '#/', onClick: () => leaveRoom() },
+    icon('door', 14), 'Выйти');
 
-  const head = h('div', { class: 'hstack hstack--wrap', style: { marginBottom: '18px' } },
-    h('a', { class: 'btn btn--sm btn--outline', href: '#/', onClick: () => leaveRoom() },
-      icon('back', 14), 'В лобби'),
-    h('div', { class: 'row__main' }, roomTitle),
-    statusChip, codeChip, linkBtn);
+  const headActions = h('div', { class: 'hstack hstack--wrap room-head__actions' });
+
+  const head = h('div', { class: 'room-head' },
+    h('div', { class: 'row__main' },
+      h('div', { class: 'hstack' }, roomTitle, modeBadge)),
+    headActions);
 
   /* ---------- боковая панель ---------- */
 
   const seatBox = h('div', { class: 'stack stack--sm' });
   const controlBox = h('div', { class: 'hstack hstack--wrap' });
-  const settingsBox = h('div', { class: 'stack stack--sm' });
   const spectatorBox = h('div', { class: 'stack stack--sm' });
 
-  const btnRotate = h('button', {
-    class: 'btn btn--sm btn--ghost',
-    title: 'Повернуть стену (R)',
-    onClick: () => board.toggleOrientation(),
-  });
-
   const boardBar = h('div', { class: 'board-bar' },
-    pill.el, btnRotate, h('div', { class: 'spacer' }), controlBox);
+    pill.el, rotate.el, h('div', { class: 'spacer' }), controlBox);
   const stage = h('div', { class: 'board-stage' });
   board.mount(stage);
   stage.append(boardBar);
 
-  const settingsPanel = panel('Настройки партии', settingsBox);
   const spectatorPanel = panel('Наблюдатели', spectatorBox);
 
-  const side = [
-    seatBox,
-    settingsPanel,
-    panel('Чат', chat.el),
-    spectatorPanel,
-  ];
+  const side = [seatBox, panel('Чат', chat.el), spectatorPanel];
 
   mount.append(head, gameLayout(stage, side));
+  rotate.paint();
 
   /* ---------- сеть ---------- */
 
   net.send({ type: 'room:join', code });
 
+  /** Пропуск в нумерации значит, что мы потеряли сообщение. Просим полный слепок. */
+  function checkSeq(m) {
+    if (typeof m.seq !== 'number') return true;
+    if (m.seq === lastSeq + 1 || m.seq === lastSeq) { lastSeq = m.seq; return true; }
+    if (m.seq > lastSeq + 1) {
+      lastSeq = m.seq;
+      const t = Date.now();
+      if (t - resyncAt > 1500) { resyncAt = t; net.send({ type: 'room:resync' }); }
+    }
+    return true;
+  }
+
   offs.push(net.on('room:state', (m) => {
     if (!m.room || m.room.code !== code) return;
     room = m.room;
+    if (typeof m.seq === 'number') lastSeq = m.seq;
     store.lastRoom = room.status === 'finished' ? null : code;
     applyState(m.state, m.started === true);
     chat.update(room.chat);
-    for (const c of room.chat) chat.seen.add(c.id);
     deadline = room.turnDeadline || 0;
     paint();
   }));
 
   offs.push(net.on('game:move', (m) => {
     if (!room) return;
+    checkSeq(m);
     applyState(m.state, false);
     if (m.auto) toast('Ход сделан автоматически: время вышло');
+    if (m.retired) toast('Игрок выбыл из партии');
     deadline = 0;
     paint();
   }));
 
-  offs.push(net.on('game:clock', (m) => {
-    deadline = m.turnDeadline || 0;
-    lowBeep = 0;
-  }));
+  offs.push(net.on('game:clock', (m) => { deadline = m.turnDeadline || 0; lowBeep = 0; }));
 
   offs.push(net.on('game:over', (m) => {
     if (!room) return;
+    checkSeq(m);
     if (m.state) applyState(m.state, true);
     room.status = 'finished';
     if (m.score) room.score = m.score;
@@ -140,7 +147,7 @@ export function renderRoom(mount, code) {
 
   offs.push(net.on('room:notice', (m) => {
     const map = {
-      disconnect: `${m.name} потерял связь — ждём ${Math.round((m.graceMs || 45000) / 1000)} с`,
+      disconnect: `${m.name} потерял связь, ждём ${Math.round((m.graceMs || 45000) / 1000)} с`,
       reconnect: `${m.name} снова в игре`,
       leave: `${m.name} вышел`,
       kick: `${m.name} исключён`,
@@ -163,12 +170,16 @@ export function renderRoom(mount, code) {
   }));
 
   offs.push(net.on('room:error', (m) => {
-    if (!room) {
-      toast(m.message || 'Не удалось войти', 'err');
-      hasLeftRoom = true;
-      if (store.lastRoom === code) store.lastRoom = null;
-      setTimeout(() => { location.hash = '#/'; }, 900);
-    }
+    if (room) return;
+    toast(m.message || 'Не удалось войти', 'err');
+    hasLeftRoom = true;
+    if (store.lastRoom === code) store.lastRoom = null;
+    setTimeout(() => { location.hash = '#/'; }, 900);
+  }));
+
+  // после переподключения состояние может устареть: просим слепок
+  offs.push(net.on('status', ({ status }) => {
+    if (status === 'online' && room) net.send({ type: 'room:resync' });
   }));
 
   const timer = setInterval(tickClock, 250);
@@ -184,24 +195,26 @@ export function renderRoom(mount, code) {
     return room?.status === 'playing' && game && game.winner === null && game.turn === mySeat();
   }
 
+  function skinList() {
+    if (!room) return [];
+    return room.seats.map((id) => (id ? room.members.find((m) => m.id === id)?.skin : null) || null);
+  }
+
   function applyState(raw, silent) {
     if (!raw) { game = null; return; }
     game = deserialize(raw);
     board.update(game, {
-      mySeat: mySeat() ?? 0,
-      flip: mySeat() === 1,
+      me: mySeat() ?? 0,
       interactive: isMyTurn(),
       lastMove: game.history[game.history.length - 1] || null,
+      skins: skinList(),
       silent: silent || firstPaint,
     });
     firstPaint = false;
   }
 
   function tickClock() {
-    if (!room || room.status !== 'playing' || !game || !deadline) {
-      updateClocks(null);
-      return;
-    }
+    if (!room || room.status !== 'playing' || !game || !deadline) { updateClocks(null); return; }
     const left = deadline - net.serverNow();
     updateClocks(Math.max(0, left));
     if (left < 10000 && left > 0 && game.turn === mySeat()) {
@@ -212,139 +225,109 @@ export function renderRoom(mount, code) {
 
   function updateClocks(left) {
     if (!room || !game) return;
-    for (const seat of [0, 1]) {
-      const turn = game.winner === null && game.turn === seat;
-      cards[seat].clock.textContent = (left !== null && turn)
-        ? `${Math.ceil(left / 1000)}с` : '';
-      cards[seat].clock.classList.toggle('is-low', !!(left !== null && turn && left < 10000));
-    }
+    cards.forEach((card, i) => {
+      const turn = game.winner === null && game.turn === i;
+      card.clock.textContent = (left !== null && turn) ? `${Math.ceil(left / 1000)}с` : '';
+      card.clock.classList.toggle('is-low', !!(left !== null && turn && left < 10000));
+    });
   }
 
   /* ---------- отрисовка ---------- */
 
   function paint() {
     if (!room) return;
+    const mode = getMode(room.settings.mode);
 
     roomTitle.textContent = room.name;
-    statusChip.className = 'badge ' + (
-      room.status === 'playing' ? 'badge--warn' : room.status === 'finished' ? '' : 'badge--ok');
-    statusChip.textContent = room.status === 'playing' ? 'идёт партия'
-      : room.status === 'finished' ? 'партия окончена' : 'ожидание';
+    modeBadge.textContent = mode.label;
 
-    paintSeats();
+    clear(headActions);
+    headActions.append(codeChip, linkBtn);
+    if (isHost() && room.status !== 'playing') headActions.append(manageBtn, startBtn);
+    headActions.append(exitBtn);
+    startBtn.disabled = room.seats.some((s) => !s);
+
+    paintSeats(mode);
     paintControls();
-    paintSettings();
     paintSpectators();
-    paintRotate();
 
     if (game) {
       board.update(game, {
-        mySeat: mySeat() ?? 0,
-        flip: mySeat() === 1,
+        me: mySeat() ?? 0,
         interactive: isMyTurn(),
         lastMove: game.history[game.history.length - 1] || null,
+        skins: skinList(),
         silent: true,
       });
     }
 
     if (room.status === 'lobby') {
-      pill.set(room.seats.filter(Boolean).length < 2 ? 'Ждём соперника' : 'Готовность', '');
+      const free = room.seats.filter((s) => !s).length;
+      pill.set(free ? `Ждём игроков: ${free}` : 'Все в сборе', '');
       if (!overlayShown) showLobbyOverlay();
     } else if (room.status === 'playing') {
       board.hideOverlay();
       overlayShown = false;
-      if (isMyTurn()) pill.set('Ваш ход', 'me');
-      else if (mySeat() === null) pill.set('Вы наблюдаете', '');
+      if (isMyTurn()) {
+        const left = game?.movesLeft ?? 1;
+        pill.set(left > 1 ? `Ваш ход, осталось действий: ${left}` : 'Ваш ход', 'me');
+      } else if (mySeat() === null) pill.set('Вы наблюдаете', '');
       else pill.set('Ход соперника', '');
     }
   }
 
-  function paintRotate() {
-    clear(btnRotate);
-    const horizontal = board.orientation === 1;
-    btnRotate.append(
-      h('span', { class: `wall-icon ${horizontal ? 'is-h' : 'is-v'}` }),
-      h('span', {}, horizontal ? 'Стена: горизонтально' : 'Стена: вертикально'),
-      h('span', { class: 'kbd' }, 'R'));
-  }
-
-  function paintSeats() {
+  function paintSeats(mode) {
     clear(seatBox);
-    for (const seat of [0, 1]) {
-      const id = room.seats[seat];
+    const teams = isTeamMode(room.settings.mode);
+    while (cards.length < room.seats.length) cards.push(new PlayerCard());
+    cards.length = room.seats.length;
+
+    room.seats.forEach((id, i) => {
       const m = id ? room.members.find((x) => x.id === id) : null;
-      const card = cards[seat];
-      const dist = game ? distanceToGoal(game, seat) : null;
+      const card = cards[i];
+      const p = game?.players[i];
+      const dist = game && p ? distanceToGoal(game, i) : null;
+      const skin = board.skins[i];
+
       card.update({
         name: m ? m.name : 'Свободное место',
+        skin,
         isMe: m?.id === store.clientId,
         isHost: m?.id === room.hostId,
         connected: m ? m.connected : undefined,
-        isTurn: room.status === 'playing' && game?.winner === null && game?.turn === seat,
-        walls: game ? game.players[seat].walls : room.settings.wallsPerPlayer,
-        wallsMax: room.settings.wallsPerPlayer,
+        out: p ? !p.active : false,
+        teamLabel: teams && mode.teamNames[mode.teams[i]] ? mode.teamNames[mode.teams[i]] : null,
+        isTurn: room.status === 'playing' && game?.winner === null && game?.turn === i,
+        walls: p ? p.walls : room.settings.wallsPerPlayer,
+        wallsMax: p ? Math.max(p.walls, room.settings.wallsPerPlayer) : room.settings.wallsPerPlayer,
         sub: room.status === 'lobby'
-          ? (m ? (m.ready ? 'готов' : 'не готов') : 'нажмите, чтобы занять')
+          ? (m ? 'в комнате' : 'ждём игрока')
           : (dist === null || dist === Infinity ? '' : `до цели ${dist} ${plural(dist, 'шаг', 'шага', 'шагов')}`),
         clockMs: null,
       });
 
       const wrap = h('div', { class: 'stack stack--sm' }, card.el);
-
-      if (room.status === 'lobby') {
-        const row = h('div', { class: 'hstack' });
-        if (!m) {
-          row.append(h('button', {
-            class: 'btn btn--sm btn--primary',
-            onClick: () => net.send({ type: 'room:sit', seat }),
-          }, icon('login', 14), 'Занять место'));
-        } else if (m.id === store.clientId) {
-          row.append(h('button', {
-            class: `btn btn--sm ${m.ready ? 'btn--ghost' : 'btn--primary'}`,
-            onClick: () => net.send({ type: 'room:ready', ready: !m.ready }),
-          }, icon(m.ready ? 'x' : 'check', 14), m.ready ? 'Не готов' : 'Готов'));
-          row.append(h('button', {
-            class: 'btn btn--sm btn--outline',
-            onClick: () => net.send({ type: 'room:sit', seat: null }),
-          }, 'Встать'));
-        } else if (isHost()) {
-          row.append(h('span', { class: `badge ${m.ready ? 'badge--ok' : ''}` }, m.ready ? 'готов' : 'ждём'));
-          row.append(h('div', { class: 'spacer' }));
-          row.append(h('button', {
-            class: 'btn btn--sm btn--danger',
-            onClick: () => net.send({ type: 'room:kick', playerId: m.id }),
-          }, icon('x', 14), 'Убрать'));
-        } else {
-          row.append(h('span', { class: `badge ${m.ready ? 'badge--ok' : ''}` }, m.ready ? 'готов' : 'ждём'));
-        }
-        if (row.children.length) wrap.append(row);
+      if (isHost() && m && m.id !== store.clientId && room.status === 'lobby') {
+        wrap.append(h('button', {
+          class: 'btn btn--sm btn--outline',
+          onClick: () => net.send({ type: 'room:kick', playerId: m.id }),
+        }, icon('x', 14), `Убрать ${m.name}`));
       }
-
       if (room.status === 'finished' && room.rematch?.includes(id)) {
         wrap.append(h('span', { class: 'badge badge--ok' }, 'хочет реванш'));
       }
       seatBox.append(wrap);
-    }
+    });
 
-    if (room.score && (room.score[0] || room.score[1])) {
+    if (room.score?.some((n) => n)) {
       seatBox.append(h('div', { class: 'hstack', style: { justifyContent: 'center' } },
         h('span', { class: 'dim-2' }, 'счёт матча'),
-        h('span', { class: 'mono', style: { fontWeight: '800' } }, `${room.score[0]} : ${room.score[1]}`)));
+        h('span', { class: 'mono', style: { fontWeight: '800' } }, room.score.join(' : '))));
     }
   }
 
   function paintControls() {
     clear(controlBox);
-    if (room.status === 'lobby') {
-      if (isHost()) {
-        const ready = room.seats.every(Boolean);
-        controlBox.append(h('button', {
-          class: 'btn btn--sm btn--primary', disabled: !ready,
-          onClick: () => net.send({ type: 'room:start' }),
-        }, icon('play', 14), 'Начать партию'));
-      }
-      return;
-    }
     if (room.status === 'playing' && mySeat() !== null) {
       controlBox.append(h('button', {
         class: 'btn btn--sm btn--danger',
@@ -365,38 +348,6 @@ export function renderRoom(mount, code) {
     }
   }
 
-  function paintSettings() {
-    settingsPanel.style.display = room.status === 'lobby' ? '' : 'none';
-    if (room.status !== 'lobby') return;
-    clear(settingsBox);
-
-    if (!isHost()) {
-      settingsBox.append(
-        kv('Стен у каждого', String(room.settings.wallsPerPlayer)),
-        kv('Время на ход', room.settings.turnTimeSec ? `${room.settings.turnTimeSec} c` : 'без таймера'),
-        kv('Доступ', room.isPrivate ? 'по паролю' : 'открытая'));
-      return;
-    }
-
-    const wallsSeg = h('div', { class: 'seg seg--block' });
-    for (const n of [6, 8, 10, 12]) {
-      wallsSeg.append(h('button', {
-        class: `seg__btn ${room.settings.wallsPerPlayer === n ? 'is-active' : ''}`,
-        onClick: () => net.send({ type: 'room:settings', wallsPerPlayer: n }),
-      }, String(n)));
-    }
-    const timeSeg = h('div', { class: 'seg seg--block' });
-    for (const [v, label] of [[0, '∞'], [15, '15с'], [30, '30с'], [60, '60с'], [120, '2м']]) {
-      timeSeg.append(h('button', {
-        class: `seg__btn ${room.settings.turnTimeSec === v ? 'is-active' : ''}`,
-        onClick: () => net.send({ type: 'room:settings', turnTimeSec: v }),
-      }, label));
-    }
-    settingsBox.append(
-      h('div', { class: 'field' }, h('label', { class: 'field__label' }, 'Стен у каждого'), wallsSeg),
-      h('div', { class: 'field' }, h('label', { class: 'field__label' }, 'Время на ход'), timeSeg));
-  }
-
   function paintSpectators() {
     const list = room.members.filter((m) => m.seat === null);
     spectatorPanel.style.display = list.length ? '' : 'none';
@@ -405,59 +356,68 @@ export function renderRoom(mount, code) {
       spectatorBox.append(h('div', { class: 'hstack' },
         icon('eye', 14),
         h('span', {}, m.name),
-        m.id === store.clientId ? h('span', { class: 'badge' }, 'вы') : null,
-        h('div', { class: 'spacer' }),
-        room.status === 'lobby' && m.id === store.clientId
-          ? h('button', {
-              class: 'btn btn--sm btn--ghost',
-              onClick: () => {
-                const free = room.seats.indexOf(null);
-                if (free === -1) return toast('Мест нет', 'err');
-                net.send({ type: 'room:sit', seat: free });
-              },
-            }, 'Сесть за стол')
-          : null));
+        m.id === store.clientId ? h('span', { class: 'badge' }, 'вы') : null));
     }
+  }
+
+  async function openManage() {
+    const cfg = await createDialog({
+      name: room.name,
+      mode: room.settings.mode,
+      wallsPerPlayer: room.settings.wallsPerPlayer,
+      turnTimeSec: room.settings.turnTimeSec,
+      isPrivate: room.isPrivate,
+      password: '',
+    });
+    if (!cfg) return;
+    net.send({ type: 'room:settings', ...cfg });
   }
 
   function showLobbyOverlay() {
     overlayShown = true;
-    const seated = room.seats.filter(Boolean).length;
+    const free = room.seats.filter((s) => !s).length;
     board.showOverlay(h('div', {},
-      h('div', { class: 'overlay__title' }, seated < 2 ? 'Ждём' : 'Почти'),
+      h('div', { class: 'overlay__title' }, free ? 'Ждём' : 'Готовы'),
       h('div', { class: 'overlay__sub' },
-        seated < 2
-          ? 'Отправьте сопернику код комнаты — партия начнётся сразу после готовности'
-          : 'Оба игрока за столом. Нажмите «Готов», и партия стартует.'),
+        free
+          ? `Отправьте ссылку игрокам. Свободных мест: ${free}`
+          : 'Все места заняты. Хост может начинать партию.'),
       h('div', { class: 'overlay__actions' },
         h('button', {
           class: 'btn btn--primary',
           onClick: async () => {
             if (await copyText(`${location.origin}/#/room/${code}`)) toast('Ссылка скопирована', 'ok');
           },
-        }, icon('share'), 'Скопировать приглашение'))));
+        }, icon('share'), 'Скопировать ссылку'))));
   }
 
   function showResult(m) {
     const seat = mySeat();
-    const iWon = seat !== null && m.winner === seat;
     const spectator = seat === null;
-    if (spectator) sfx.notify();
-    else if (iWon) { sfx.win(); board.celebrate(seat); store.recordOnline(true); }
-    else { sfx.lose(); store.recordOnline(false); }
+    const iWon = !spectator && Array.isArray(m.winners) && m.winners.includes(seat);
+
+    if (!spectator) {
+      const rivals = Math.max(1, (room.seats.length || 2) - 1);
+      const gain = store.earn(onlineReward(iWon, rivals));
+      store.recordOnline(iWon);
+      if (iWon) { sfx.win(); board.celebrate(seat); } else sfx.lose();
+      toast(`Начислено ${fmt(gain)}`, 'ok', 4000);
+    } else sfx.notify();
 
     const reason = {
       goal: 'фишка дошла до противоположного края',
       resign: 'соперник сдался',
       timeout: 'закончилось время',
       disconnect: 'соперник не вернулся в игру',
+      alone: 'остальные вышли из партии',
     }[m.reason] || m.reason;
 
     overlayShown = true;
     board.showOverlay(h('div', {},
       h('div', { class: `overlay__title ${iWon ? 'is-win' : spectator ? '' : 'is-lose'}` },
         spectator ? 'Финал' : iWon ? 'Победа' : 'Поражение'),
-      h('div', { class: 'overlay__sub' }, `${m.winnerName} — ${reason}`),
+      h('div', { class: 'overlay__sub' },
+        `${(m.winnerNames || []).join(' и ') || m.teamName || 'Никто'}: ${reason}`),
       h('div', { class: 'overlay__actions' },
         seat !== null
           ? h('button', {
@@ -466,7 +426,7 @@ export function renderRoom(mount, code) {
             }, icon('rotate'), 'Реванш')
           : null,
         h('a', { class: 'btn btn--ghost', href: '#/', onClick: () => leaveRoom() },
-          icon('back'), 'В лобби'))));
+          icon('door'), 'Выйти'))));
     pill.set(spectator ? 'Партия окончена' : iWon ? 'Вы победили' : 'Вы проиграли', iWon ? 'me' : '');
   }
 
@@ -483,8 +443,6 @@ export function renderRoom(mount, code) {
       window.removeEventListener('coridor:settings', onSettings);
       board.destroy();
       if (hasLeftRoom) return;
-      // Уходим со страницы, не нажав «В лобби». Если партия идёт и мы за столом —
-      // место сохраняем: игрок сможет вернуться по кнопке «Продолжить партию».
       const playingSeated = room?.status === 'playing' && mySeat() !== null;
       if (!playingSeated) {
         store.lastRoom = null;
@@ -492,11 +450,4 @@ export function renderRoom(mount, code) {
       }
     },
   };
-}
-
-function kv(k, v) {
-  return h('div', { class: 'hstack' },
-    h('span', { class: 'dim-2' }, k),
-    h('div', { class: 'spacer' }),
-    h('span', { style: { fontSize: '13px', fontWeight: '600' } }, v));
 }

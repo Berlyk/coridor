@@ -1,6 +1,7 @@
-/* Локальный профиль, настройки и статистика. */
+/* Локальный профиль, настройки, валюта и статистика. */
 
-const KEY = 'coridor.v1';
+const KEY = 'coridor.v2';
+const OLD_KEY = 'coridor.v1';
 
 const DEFAULTS = {
   clientId: null,
@@ -12,27 +13,37 @@ const DEFAULTS = {
   botLevel: 'medium',
   botSide: 0,
   skin: 'classic',
+  owned: ['classic', 'chalk'],
+  coins: 120,
   stats: {
     bot: { easy: [0, 0], medium: [0, 0], hard: [0, 0], expert: [0, 0] },
     online: [0, 0],
   },
 };
 
+function blank() {
+  return { ...DEFAULTS, owned: DEFAULTS.owned.slice(), stats: structuredClone(DEFAULTS.stats) };
+}
+
 function read() {
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return { ...DEFAULTS, stats: structuredClone(DEFAULTS.stats) };
+    const raw = localStorage.getItem(KEY) || localStorage.getItem(OLD_KEY);
+    if (!raw) return blank();
     const parsed = JSON.parse(raw);
+    const owned = Array.isArray(parsed.owned) ? parsed.owned.slice() : DEFAULTS.owned.slice();
+    for (const id of DEFAULTS.owned) if (!owned.includes(id)) owned.push(id);
     return {
       ...DEFAULTS,
       ...parsed,
+      owned,
+      coins: Number.isFinite(parsed.coins) ? parsed.coins : DEFAULTS.coins,
       stats: {
         bot: { ...DEFAULTS.stats.bot, ...(parsed.stats?.bot || {}) },
         online: parsed.stats?.online || [0, 0],
       },
     };
   } catch {
-    return { ...DEFAULTS, stats: structuredClone(DEFAULTS.stats) };
+    return blank();
   }
 }
 
@@ -84,6 +95,32 @@ export const store = {
 
   get skin() { return state.skin || 'classic'; },
   set skin(v) { state.skin = String(v || 'classic'); write(); },
+
+  get owned() { return state.owned; },
+  has(id) { return state.owned.includes(id); },
+
+  get coins() { return state.coins; },
+
+  /** Начислить валюту. */
+  earn(amount) {
+    const n = Math.max(0, Math.round(amount || 0));
+    if (!n) return 0;
+    state.coins += n;
+    write();
+    window.dispatchEvent(new CustomEvent('coridor:coins', { detail: { coins: state.coins, gained: n } }));
+    return n;
+  },
+
+  /** Купить скин. Возвращает true, если хватило валюты. */
+  buy(id, price) {
+    if (state.owned.includes(id)) return true;
+    if (state.coins < price) return false;
+    state.coins -= price;
+    state.owned.push(id);
+    write();
+    window.dispatchEvent(new CustomEvent('coridor:coins', { detail: { coins: state.coins, gained: -price } }));
+    return true;
+  },
 
   get lastRoom() { return state.lastRoom; },
   set lastRoom(v) { state.lastRoom = v; write(); },

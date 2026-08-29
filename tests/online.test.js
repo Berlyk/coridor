@@ -95,10 +95,9 @@ async function main() {
 
   /* --- старт --- */
   const started = a.wait('room:state', (m) => m.room.status === 'playing');
-  a.send({ type: 'room:ready', ready: true });
-  b.send({ type: 'room:ready', ready: true });
+  a.send({ type: 'room:start' });
   const st = await started;
-  ok(st.room.status === 'playing', 'партия стартовала после готовности обоих');
+  ok(st.room.status === 'playing', 'партия стартовала по кнопке хоста');
   ok(st.state?.players[0].r === 8 && st.state?.players[1].r === 0, 'начальная расстановка верна');
 
   /* --- проверка правил на сервере --- */
@@ -139,7 +138,8 @@ async function main() {
   if (!over && lastReject) console.log('    последний отказ:', JSON.stringify(lastReject.message));
   await Promise.race([overP, sleep(1500)]);
   ok(!!over, `партия дошла до конца за ${plies} полуходов`);
-  ok(over && (over.winner === 0 || over.winner === 1), `победитель: ${over?.winnerName}`);
+  ok(over && (over.winnerTeam === 0 || over.winnerTeam === 1),
+    `победитель: ${(over?.winnerNames || []).join(', ')}`);
 
   /* --- чат --- */
   const chatP = b.wait('chat:msg', (m) => !m.message.sys);
@@ -153,6 +153,8 @@ async function main() {
   const rm = await rematchStarted;
   ok(rm.room.status === 'playing', 'реванш стартовал');
   ok(rm.room.seats[0] === b.id && rm.room.seats[1] === a.id, 'стороны поменялись местами');
+  const bIsFirst = rm.state.turn === 0;
+  ok(bIsFirst, 'первым ходит тот, кто теперь снизу');
 
   /* --- обрыв и возврат --- */
   const noticeP = a.wait('room:notice', (m) => m.kind === 'disconnect');
@@ -173,15 +175,39 @@ async function main() {
   const o2 = await overP2;
   ok(o2.reason === 'resign', 'сдача засчитана сопернику');
 
-  /* --- быстрый подбор --- */
-  const q1 = new Client('Q1');
-  const q2 = new Client('Q2');
-  await Promise.all([q1.ready, q2.ready]);
-  const qRoom = q1.wait('room:state', (m) => m.room.status === 'playing');
-  q1.send({ type: 'queue:join' });
-  await sleep(120);
-  q2.send({ type: 'queue:join' });
-  ok((await qRoom).room.status === 'playing', 'быстрый подбор свёл двоих и начал партию');
+  /* --- режим на четверых --- */
+  const q = [];
+  for (let i = 0; i < 4; i++) q.push(new Client('P' + i));
+  await Promise.all(q.map((c) => c.ready));
+  const made = q[0].wait('room:state');
+  q[0].send({ type: 'room:create', name: 'Четверо', mode: 'ffa', turnTimeSec: 0 });
+  const ffaCode = (await made).room.code;
+  for (let i = 1; i < 4; i++) {
+    const j = q[i].wait('room:state', (m) => m.room.seats.filter(Boolean).length === i + 1);
+    q[i].send({ type: 'room:join', code: ffaCode });
+    await j;
+  }
+  const ffaStart = q[0].wait('room:state', (m) => m.room.status === 'playing');
+  q[0].send({ type: 'room:start' });
+  const ffaRoom = await ffaStart;
+  ok(ffaRoom.room.seats.filter(Boolean).length === 4, 'четверо расселись автоматически');
+  ok(ffaRoom.state.players.length === 4, 'на доске четыре фишки');
+
+  // смена режима в лобби пересобирает рассадку
+  const t3 = new Client('Хост');
+  const t4 = new Client('Гость');
+  await Promise.all([t3.ready, t4.ready]);
+  const mkRoom = t3.wait('room:state');
+  t3.send({ type: 'room:create', name: 'Смена режима', mode: 'duel', turnTimeSec: 0 });
+  const mCode = (await mkRoom).room.code;
+  const gotIn = t4.wait('room:state', (m) => m.room.seats.filter(Boolean).length === 2);
+  t4.send({ type: 'room:join', code: mCode });
+  await gotIn;
+  const switched = t3.wait('room:state', (m) => m.room.settings.mode === 'siege');
+  t3.send({ type: 'room:settings', mode: 'siege' });
+  const sw = await switched;
+  ok(sw.room.capacity === 3, 'смена режима меняет число мест');
+  ok(sw.room.seats.filter(Boolean).length === 2, 'уже сидящие игроки остались за столом');
 
   /* --- таймер хода --- */
   const t1 = new Client('T1');
@@ -194,13 +220,12 @@ async function main() {
   t2.send({ type: 'room:join', code: tCode });
   await tJoin;
   const tStart = t1.wait('room:state', (m) => m.room.status === 'playing');
-  t1.send({ type: 'room:ready', ready: true });
-  t2.send({ type: 'room:ready', ready: true });
+  t1.send({ type: 'room:start' });
   await tStart;
   const clock = await t1.wait('game:clock', null, 3000).catch(() => null);
   ok(!!(clock && clock.turnDeadline > Date.now()), 'сервер прислал дедлайн хода');
 
-  for (const cl of [a, b2, c, q1, q2, t1, t2]) cl.close();
+  for (const cl of [a, b2, c, t1, t2, t3, t4, ...q]) cl.close();
   await sleep(250);
 
   console.log(`\n${failures ? failures + ' ПРОВАЛОВ' : 'ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ'}\n`);
