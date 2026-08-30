@@ -59,15 +59,19 @@ async function serveFile(res, filePath, req) {
   const ext = path.extname(filePath).toLowerCase();
   const etag = `W/"${stat.size.toString(16)}-${stat.mtimeMs.toString(16)}"`;
   if (req.headers['if-none-match'] === etag) {
-    res.writeHead(304, { ETag: etag });
+    res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache, must-revalidate' });
     res.end();
     return true;
   }
 
+  // Код игры это набор ES-модулей без хешей в именах, поэтому смесь старой и
+  // новой версии ломает клиент. Заставляем и браузер, и Cloudflare каждый раз
+  // сверяться по ETag: ответ почти всегда 304, зато версия всегда одна.
+  const live = ['.html', '.js', '.mjs', '.css', '.json'].includes(ext);
   res.writeHead(200, {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Content-Length': stat.size,
-    'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=0, must-revalidate',
+    'Cache-Control': live ? 'no-cache, must-revalidate' : 'public, max-age=604800',
     ETag: etag,
   });
   if (req.method === 'HEAD') { res.end(); return true; }
@@ -91,7 +95,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // общий код правил лежит вне public/ — отдаём по префиксу /shared/
+  // общий код правил лежит вне public/, отдаём по префиксу /shared/
   if (pathname.startsWith('/shared/')) {
     const file = safeJoin(SHARED, pathname.slice('/shared'.length));
     if (file && await serveFile(res, file, req)) return;
@@ -108,7 +112,7 @@ const server = http.createServer(async (req, res) => {
   if (!path.extname(pathname) && await serveFile(res, index, req)) return;
 
   res.writeHead(404, { 'Content-Type': MIME['.txt'] });
-  res.end('404 — страница не найдена');
+  res.end('404: страница не найдена');
 });
 
 attachWebSocket(server, (conn) => hub.attach(conn), { path: '/ws' });
