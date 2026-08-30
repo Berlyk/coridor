@@ -20,6 +20,7 @@ export class Board {
    *   onMove(move)      пользователь сделал ход
    *   onIllegal(reason) попытка недопустимого хода
    *   onOrient(o)       сменился угол стены
+   *   onBlocked()       клик по доске, когда ходить нельзя
    */
   constructor(opts = {}) {
     this.opts = opts;
@@ -415,8 +416,8 @@ export class Board {
     });
 
     hit.addEventListener('pointerdown', (e) => {
-      if (!this.interactive) return;
       if (e.button === 2) return;
+      if (!this.interactive) { this.opts.onBlocked?.(); return; }
       const target = this._targetFromEvent(e);
       if (!target) return;
 

@@ -156,7 +156,7 @@ export function renderHome(mount, startTab) {
       type: 'room:create',
       name: `Партия ${store.name}`,
       mode: 'duel',
-      turnTimeSec: 60,
+      turnTimeSec: 0,
     });
   }
 
@@ -246,7 +246,7 @@ export async function createDialog(preset = null) {
     name: preset?.name ?? `Партия ${store.name}`,
     mode: preset?.mode ?? 'duel',
     wallsPerPlayer: preset?.wallsPerPlayer ?? getMode(preset?.mode ?? 'duel').walls[0],
-    turnTimeSec: preset?.turnTimeSec ?? 60,
+    turnTimeSec: preset?.turnTimeSec ?? 0,
     isPrivate: preset?.isPrivate ?? false,
     password: preset?.password ?? '',
   };

@@ -581,6 +581,24 @@
 .turn-pill.is-me { border-color: rgba(220,38,38,.5); color: #fff; background: rgba(220,38,38,.14); }
 .turn-pill.is-thinking { border-color: rgba(234,179,8,.4); color: #fde047; background: rgba(234,179,8,.1); }
 .turn-pill__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.clock-pill {
+  display: inline-flex; align-items: center;
+  height: 34px; padding: 0 14px;
+  border-radius: 99px;
+  font-family: var(--mono);
+  font-size: 13px; font-weight: 700;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.clock-pill.is-low {
+  border-color: rgba(220,38,38,.55);
+  background: rgba(220,38,38,.14);
+  color: #fca5a5;
+  animation: pulse-dot .8s infinite;
+}
+
 .turn-pill.is-me .turn-pill__dot,
 .turn-pill.is-thinking .turn-pill__dot { animation: pulse-dot 1.2s infinite; }
 

@@ -326,7 +326,7 @@ export class Hub {
       : clampInt(raw.wallsPerPlayer, 3, 20, baseWalls);
     const turnTimeSec = TURN_TIMES.includes(raw.turnTimeSec)
       ? raw.turnTimeSec
-      : (prev ? prev.turnTimeSec : 60);
+      : (prev ? prev.turnTimeSec : 0);
     return { mode: modeId, wallsPerPlayer, turnTimeSec };
   }
 

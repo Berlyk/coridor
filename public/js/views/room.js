@@ -1,6 +1,8 @@
 /* Онлайн-комната: лобби, партия, чат. */
 
-import { deserialize, distanceToGoal, getMode, isTeamMode } from '/shared/quoridor.js';
+import {
+  deserialize, cloneGame, applyMove, distanceToGoal, getMode, isTeamMode,
+} from '/shared/quoridor.js';
 import { h, clear, icon, toast, copyText, confirmDialog, plural, coinReward } from '../ui.js';
 import { store } from '../store.js';
 import { sfx } from '../sound.js';
@@ -21,14 +23,15 @@ export function renderRoom(mount, code) {
   let hasLeftRoom = false;
   let lastSeq = 0;
   let resyncAt = 0;
+  let pendingPly = -1;      // ход, который мы применили у себя и ждём подтверждения
+  let pendingAt = 0;
+  let wasOnline = true;
 
   const board = new Board({
-    onMove: (mv) => {
-      if (!isMyTurn()) return;
-      net.send({ type: 'game:move', move: mv });
-    },
+    onMove: (mv) => sendMove(mv),
     onIllegal: (msg) => toast(msg, 'err', 1800),
     onOrient: () => rotate.paint(),
+    onBlocked: () => explainBlock(),
   });
 
   const rotate = rotateButton(() => board);
@@ -71,8 +74,10 @@ export function renderRoom(mount, code) {
   const controlBox = h('div', { class: 'hstack hstack--wrap' });
   const spectatorBox = h('div', { class: 'stack stack--sm' });
 
+  const clockPill = h('div', { class: 'clock-pill', style: { display: 'none' } });
+
   const boardBar = h('div', { class: 'board-bar' },
-    pill.el, rotate.el, h('div', { class: 'spacer' }), controlBox);
+    pill.el, clockPill, rotate.el, h('div', { class: 'spacer' }), controlBox);
   const stage = h('div', { class: 'board-stage' });
   board.mount(stage);
   stage.append(boardBar);
@@ -90,14 +95,25 @@ export function renderRoom(mount, code) {
 
   net.send({ type: 'room:join', code });
 
+  function requestResync(force = false) {
+    const t = Date.now();
+    if (!force && t - resyncAt < 1500) return;
+    resyncAt = t;
+    net.send({ type: 'room:resync' });
+  }
+
+  function nameOfSeat(i) {
+    const id = room?.seats?.[i];
+    return (id && room.members.find((m) => m.id === id)?.name) || 'игрока';
+  }
+
   /** Пропуск в нумерации значит, что мы потеряли сообщение. Просим полный слепок. */
   function checkSeq(m) {
     if (typeof m.seq !== 'number') return true;
     if (m.seq === lastSeq + 1 || m.seq === lastSeq) { lastSeq = m.seq; return true; }
     if (m.seq > lastSeq + 1) {
       lastSeq = m.seq;
-      const t = Date.now();
-      if (t - resyncAt > 1500) { resyncAt = t; net.send({ type: 'room:resync' }); }
+      requestResync();
     }
     return true;
   }
@@ -106,6 +122,7 @@ export function renderRoom(mount, code) {
     if (!m.room || m.room.code !== code) return;
     room = m.room;
     if (typeof m.seq === 'number') lastSeq = m.seq;
+    if (m.started) pendingPly = -1;
     store.lastRoom = room.status === 'finished' ? null : code;
     applyState(m.state, m.started === true);
     chat.update(room.chat);
@@ -116,8 +133,13 @@ export function renderRoom(mount, code) {
   offs.push(net.on('game:move', (m) => {
     if (!room) return;
     checkSeq(m);
+    // если между нашим состоянием и пришедшим есть дыра, просим полный слепок
+    if (game && m.state && m.state.ply > game.ply + 1) requestResync();
     applyState(m.state, false);
-    if (m.auto) toast('Ход сделан автоматически: время вышло');
+    if (m.auto) {
+      toast(`Время вышло, сервер походил за ${nameOfSeat(m.by)}`, 'err', 5000);
+      sfx.deny();
+    }
     if (m.retired) toast('Игрок выбыл из партии');
     deadline = 0;
     paint();
@@ -139,7 +161,9 @@ export function renderRoom(mount, code) {
   offs.push(net.on('game:reject', (m) => {
     toast(m.message || 'Ход отклонён', 'err');
     sfx.deny();
+    pendingPly = -1;
     if (m.state) applyState(m.state, true);
+    else requestResync();
     paint();
   }));
 
@@ -179,21 +203,100 @@ export function renderRoom(mount, code) {
     setTimeout(() => { location.hash = '#/'; }, 900);
   }));
 
-  // после переподключения состояние может устареть: просим слепок
+  // слепок просим только когда связь реально восстановилась
   offs.push(net.on('status', ({ status }) => {
-    if (status === 'online' && room) net.send({ type: 'room:resync' });
+    const online = status === 'online';
+    if (online && !wasOnline && room) requestResync(true);
+    wasOnline = online;
   }));
 
+  // вкладку сворачивали: браузер тормозит таймеры, состояние могло устареть
+  const onVisible = () => {
+    if (document.visibilityState === 'visible' && room) requestResync();
+  };
+  document.addEventListener('visibilitychange', onVisible);
+
   const timer = setInterval(tickClock, 250);
+  // страховка: если подтверждение хода не пришло, разблокируем доску
+  const stuckTimer = setInterval(() => {
+    if (pendingPly >= 0 && Date.now() - pendingAt > 4000) {
+      pendingPly = -1;
+      requestResync(true);
+      paint();
+    }
+  }, 1000);
   const onSettings = () => paint();
   window.addEventListener('coridor:settings', onSettings);
 
   /* ---------- вспомогательное ---------- */
 
+  /** Почему сейчас нельзя ходить: клик по доске не должен проваливаться молча. */
+  function explainBlock() {
+    if (!room) return;
+    if (room.status === 'lobby') return toast('Партия ещё не началась', 'err', 1600);
+    if (room.status === 'finished') return toast('Партия уже закончилась', 'err', 1600);
+    if (mySeat() === null) return toast('Вы наблюдаете за партией', 'err', 1600);
+    if (pendingPly >= 0) return toast('Ход отправляется', '', 1200);
+    if (game && game.turn !== mySeat()) {
+      sfx.deny();
+      return toast(`Сейчас ходит ${nameOfSeat(game.turn)}`, 'err', 1600);
+    }
+  }
+
+  /**
+   * Ход применяется сразу локально и только потом уходит на сервер.
+   * Так фишка двигается мгновенно, а не через круг по сети.
+   * Если сервер не согласится, он пришлёт game:reject с настоящим состоянием.
+   */
+  function sendMove(mv) {
+    if (!room || !game) return;
+    if (room.status !== 'playing') {
+      toast('Партия ещё не началась', 'err', 1600);
+      return sfx.deny();
+    }
+    if (mySeat() === null) {
+      toast('Вы наблюдаете за партией', 'err', 1600);
+      return sfx.deny();
+    }
+    if (game.winner !== null) {
+      toast('Партия уже закончилась', 'err', 1600);
+      return sfx.deny();
+    }
+    if (game.turn !== mySeat()) {
+      toast('Сейчас ходит соперник', 'err', 1600);
+      return sfx.deny();
+    }
+    if (pendingPly >= 0) return;      // предыдущий ход ещё не подтверждён
+
+    const next = cloneGame(game);
+    const res = applyMove(next, mySeat(), mv);
+    if (!res.ok) { toast(res.message, 'err', 1800); return sfx.deny(); }
+
+    pendingPly = next.ply;
+    pendingAt = Date.now();
+    game = next;
+    render(false);
+    paint();
+    net.send({ type: 'game:move', move: mv });
+  }
+
+  /** Перерисовать доску по текущему состоянию. */
+  function render(silent) {
+    if (!game) return;
+    board.update(game, {
+      me: mySeat() ?? 0,
+      interactive: isMyTurn(),
+      lastMove: game.history[game.history.length - 1] || null,
+      skins: skinList(),
+      silent,
+    });
+  }
+
   function me() { return room?.members.find((x) => x.id === store.clientId) || null; }
   function mySeat() { const m = me(); return m ? m.seat : null; }
   function isHost() { return room?.hostId === store.clientId; }
   function isMyTurn() {
+    if (pendingPly >= 0) return false;
     return room?.status === 'playing' && game && game.winner === null && game.turn === mySeat();
   }
 
@@ -207,14 +310,12 @@ export function renderRoom(mount, code) {
 
   function applyState(raw, silent) {
     if (!raw) { game = null; return; }
-    game = deserialize(raw);
-    board.update(game, {
-      me: mySeat() ?? 0,
-      interactive: isMyTurn(),
-      lastMove: game.history[game.history.length - 1] || null,
-      skins: skinList(),
-      silent: silent || firstPaint,
-    });
+    const next = deserialize(raw);
+    // свой уже показанный ход не анимируем второй раз
+    const confirmsPending = pendingPly >= 0 && next.ply >= pendingPly;
+    if (confirmsPending) pendingPly = -1;
+    game = next;
+    render(silent || firstPaint || confirmsPending);
     firstPaint = false;
   }
 
@@ -235,6 +336,18 @@ export function renderRoom(mount, code) {
       card.clock.textContent = (left !== null && turn) ? `${Math.ceil(left / 1000)}с` : '';
       card.clock.classList.toggle('is-low', !!(left !== null && turn && left < 10000));
     });
+
+    if (left === null || room.status !== 'playing') {
+      clockPill.style.display = 'none';
+      return;
+    }
+    const sec = Math.ceil(left / 1000);
+    const mine = game.turn === mySeat();
+    clockPill.style.display = '';
+    clockPill.className = 'clock-pill' + (left < 10000 ? ' is-low' : '');
+    clockPill.textContent = mine
+      ? `Ваш ход: ${sec} с`
+      : `Ход соперника: ${sec} с`;
   }
 
   /* ---------- отрисовка ---------- */
@@ -448,6 +561,8 @@ export function renderRoom(mount, code) {
     destroy() {
       for (const off of offs) off();
       clearInterval(timer);
+      clearInterval(stuckTimer);
+      document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('coridor:settings', onSettings);
       board.destroy();
       if (hasLeftRoom) return;
