@@ -5,7 +5,7 @@
 Дизайн в стилистике [CourtGame](https://courtgame.site): тёмная сцена `#0b0b0f`,
 красный акцент `hsl(0 72% 51%)`, карточки zinc-900.
 
-**Играть: http://coridor.80.241.214.172.sslip.io**
+**Играть: https://coridorgame.site**
 
 Ноль зависимостей: собственный WebSocket-сервер поверх `node:http`, фронтенд — ES-модули
 без сборки. Достаточно Node 18+.
@@ -156,10 +156,21 @@ node tests/online.test.js
 
 ## Деплой
 
-В репозитории лежит `Dockerfile` без стадии сборки — образ просто копирует исходники
+В репозитории лежит `Dockerfile` без стадии сборки: образ просто копирует исходники
 в `node:22-alpine`. На Coolify заведён проект «Коридор» с приложением `coridor`:
 публичный репозиторий, build pack `Dockerfile`, `Ports Exposes` = 8080.
 Порт берётся из `PORT`, поэтому healthcheck и сервер всегда слушают одно и то же.
+
+Домен `coridorgame.site` куплен на Namecheap, nameservers переключены на Cloudflare
+(`adel.ns.cloudflare.com`, `chip.ns.cloudflare.com`). В Cloudflare стоят проксируемые
+A-записи `@` и `www` на IP сервера, режим шифрования Flexible, включён Always Use HTTPS
+и WebSockets. Прокси Cloudflare заодно решает проблему доступа из России:
+запросы идут через её сеть, а не напрямую на заблокированный там хостинг.
+
+В Coolify у приложения три домена: `http://coridorgame.site`,
+`http://www.coridorgame.site` и запасной `http://coridor.80.241.214.172.sslip.io`.
+Клиент берёт адрес WebSocket из `location.host`, поэтому игра работает на любом из них
+без правок кода.
 
 ## Хранение
 
